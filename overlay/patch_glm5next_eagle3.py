@@ -1,0 +1,103 @@
+"""EAGLE3 aux-hidden-state plumbing for glm5next (needed by the DFlash/DFlash2 speculator).
+
+The nightly's Glm5Next model has none. Port of the MiaAI fork block: collect hidden
+states after the requested layers, contract the 4 mHC streams -> [tokens, hidden]
+(deepseek_v4 eagle3 pattern), return (hidden, aux); EagleModelMixin on the inner
+model and SupportsEagle3 on both entry classes.
+"""
+import pathlib
+import sys
+
+p = pathlib.Path("/usr/local/lib/python3.12/dist-packages/vllm/models/glm5next/nvidia/model.py")
+s = p.read_text()
+if "[eagle3-port]" in s:
+    print("model.py: eagle3 deja patche")
+    sys.exit(0)
+
+edits = [
+    (
+        "from vllm.model_executor.models.interfaces import (\n"
+        "    HasInnerState,\n"
+        "    IsHybrid,\n"
+        "    MixtureOfExperts,\n"
+        "    SupportsPP,\n"
+        ")\n",
+        "from vllm.model_executor.models.interfaces import (  # [eagle3-port]\n"
+        "    EagleModelMixin,\n"
+        "    HasInnerState,\n"
+        "    IsHybrid,\n"
+        "    MixtureOfExperts,\n"
+        "    SupportsEagle3,\n"
+        "    SupportsPP,\n"
+        ")\n",
+    ),
+    (
+        "class Glm5NextModel(nn.Module):\n",
+        "class Glm5NextModel(nn.Module, EagleModelMixin):\n",
+    ),
+    (
+        "        self._active_layers = self.layers[self.start_layer : self.end_layer]\n",
+        "        self._active_layers = self.layers[self.start_layer : self.end_layer]\n"
+        "        self.aux_hidden_state_layers: tuple[int, ...] = ()\n",
+    ),
+    (
+        "        for layer in self._active_layers:\n"
+        "            hidden_states, residual, post, comb = layer(\n"
+        "                positions, hidden_states, residual, post, comb\n"
+        "            )\n",
+        "        aux_hidden_states: list[torch.Tensor] = []\n"
+        "        for idx, layer in enumerate(self._active_layers, start=self.start_layer):\n"
+        "            hidden_states, residual, post, comb = layer(\n"
+        "                positions, hidden_states, residual, post, comb\n"
+        "            )\n"
+        "            if idx + 1 not in self.aux_hidden_state_layers:\n"
+        "                continue\n"
+        "            # Mid-stack mHC defers hc_post; materialize then contract\n"
+        "            # 4 streams -> [tokens, hidden] (deepseek_v4 eagle3 pattern).\n"
+        "            if post is not None and hasattr(layer, \"hc_post\"):\n"
+        "                value = hc_contract(\n"
+        "                    layer.hc_post(hidden_states, residual, post, comb),\n"
+        "                    layer.n,\n"
+        "                )\n"
+        "            else:\n"
+        "                value = hidden_states\n"
+        "                if value.ndim == 3:\n"
+        "                    value = value.mean(dim=1)\n"
+        "            if self.is_sequence_parallel:\n"
+        "                value = sp_all_gather(value)[:full_num_tokens]\n"
+        "            aux_hidden_states.append(value)\n",
+    ),
+    (
+        "        hidden_states = self.norm(hidden_states)\n"
+        "        return hidden_states\n"
+        "\n"
+        "    def load_weights(",
+        "        hidden_states = self.norm(hidden_states)\n"
+        "        if aux_hidden_states:\n"
+        "            return hidden_states, aux_hidden_states\n"
+        "        return hidden_states\n"
+        "\n"
+        "    def load_weights(",
+    ),
+    (
+        "class Glm5NextForCausalLM(\n"
+        "    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid\n"
+        "):\n",
+        "class Glm5NextForCausalLM(\n"
+        "    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid, SupportsEagle3\n"
+        "):\n",
+    ),
+    (
+        "class Glm5NextForConditionalGeneration(\n"
+        "    Glm4vForConditionalGeneration, HasInnerState, IsHybrid\n"
+        "):\n",
+        "class Glm5NextForConditionalGeneration(\n"
+        "    Glm4vForConditionalGeneration, HasInnerState, IsHybrid, SupportsEagle3\n"
+        "):\n",
+    ),
+]
+for old, new in edits:
+    assert s.count(old) == 1, f"model.py: contexte introuvable/ambigu:\n{old}"
+    s = s.replace(old, new)
+p.write_text(s)
+print("model.py: eagle3 patche")

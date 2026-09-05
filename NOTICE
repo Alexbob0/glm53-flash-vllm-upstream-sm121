@@ -1,0 +1,18 @@
+This repository bundles or adapts work from:
+
+- MiaAI Lab — GLM-5.3-Flash-EXL3-2x-DGX-Sparks (MIT):
+    overlay/exl3.py                       EXL3 quantization plugin for vLLM (extended here: dense
+                                          non-routed EXL3 with per-shard TP, lm_head, draft loader)
+    overlay/flashinfer_mla_sparse_sm120.py SM120 sparse-MLA backend with in-impl RoPE padding
+                                          (extended here: top-k split 2048+extra with LSE merge)
+    exl3-fat-kernel/*                     E2 fat-expert GEMM kernel and its graft script
+    The EAGLE3 aux-hidden-state block, the drafter KV group logic and the fused context-KV
+    reconstruction for an EXL3 draft are ports/adaptations of their fork of vLLM.
+- MiaAI Lab — exllamav3 fork (MIT), built from source by the Dockerfile.
+- turboderp — ExLlamaV3 (MIT), the upstream of that fork.
+- vLLM project (Apache-2.0): all patch_*.py files modify files of the official image in place.
+
+No model weights are distributed. GLM-5.3-Flash is © Z.ai (MIT); the EXL3 routed-expert pack is
+Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw (ShapleyMCG License 1.0); the dense-layer overlay comes from
+turboderp/GLM-5.3-Flash-exl3; the DFlash2 draft is incoai/GLM-5.3-Flash-DFlash2 (CC BY-NC-ND 4.0 —
+an EXL3 re-quantization of it must not be redistributed).
