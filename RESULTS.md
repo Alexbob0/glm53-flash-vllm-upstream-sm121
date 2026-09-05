@@ -32,6 +32,15 @@ The first long prefill after boot is ~2× slower (JIT / autotune); `warmup.sh` a
 Decode speed is flat from 8K to 100K of context; a repeated 100K prompt hits the prefix cache
 (TTFT 0.6 s).
 
+## Concurrency (bench/bench_conc_long.py, 12K-token distinct prompts, 256 output tokens)
+
+| | c = 1 | c = 4 |
+|---|---|---|
+| k = 7 | 31.3 tok/s | 5.6–15.6 per stream, ~58 tok/s aggregate (steady state), TTFT 15.7 → 44.8 s (prefills serialize at ~1 000 tok/s) |
+| k = 5 | 31.7 | ~62.6 aggregate; but −17 % structured / −9 % code at c = 1 |
+
+Draft KV block 1024 (see PITFALLS): KV usage 31 % at 4 × 12K, no preemption; estimator 1.84M tokens at 1M.
+
 ## Memory / context
 
 | max_model_len | gpu_memory_utilization | KV available | notes |

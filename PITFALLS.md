@@ -42,6 +42,15 @@ Things that cost us a boot (8–10 minutes each on this hardware), in the order 
   boot; if it fails, stop and restart **both** ranks. Root cause not yet identified (concurrent
   JIT/autotune on both ranks is the leading suspect).
 - **The first 8K prefill after boot is ~2× slower** (JIT/autotune); measure on the second pass.
+- **Draft KV group block size vs concurrent prefills.** With 64-token draft blocks (the fork's
+  padded slot-share default) an 18K prompt transiently needs 281 shared block ids during its
+  prefill (the SWA window is trimmed only afterwards); three concurrent prefills exceed the
+  ~590-id pool, the scheduler preempts running decodes and the engine thrashes (KV usage
+  oscillating 65 → 99 %, generation < 10 tok/s). `GLM53_DRAFT_BLOCK=1024` (default now) keeps the
+  page under the MLA page and cuts the id pressure 16×: KV usage 31 % with 4 × 12K requests.
+- **Concurrency scaling is structural**: c1 → c4 at 12K context is ×1.9 on this model (34 KDA
+  layers verified per draft block, 288 experts top-8 → nearly all experts touched per step at
+  4 × 8 draft rows); k=5 buys +8 % at c4 but costs −17 % structured / −9 % code at c1. Keep k=7.
 - **`docker rm -f` deletes the container log.** `docker logs > file` first.
 - **Two engines on one node.** A forgotten worker container from another stack holds ~98 GB and
   makes the next NCCL init fail with `NCCL error: unhandled cuda error`. Check `docker ps` on both

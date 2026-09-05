@@ -47,7 +47,7 @@ ARGS=(serve "$MODEL"
   --host 0.0.0.0 --port "$PORT"
   --tensor-parallel-size 2 --nnodes 2 --master-addr "$HEAD_IP" --master-port "${MASTER_PORT:-29811}"
   --distributed-executor-backend mp
-  --max-model-len "$MAX_LEN" --max-num-seqs "${SEQS:-4}"
+  --max-model-len "$MAX_LEN" --max-num-seqs "${SEQS:-6}"
   --max-num-batched-tokens "${MNBT:-7168}"
   --gpu-memory-utilization "$GMU"
   --kv-cache-dtype fp8                      # canonicalized to fp8_ds_mla by the SM120 backend

@@ -1,12 +1,10 @@
-"""KV cache "drafter group" for GLM-5.3-Flash + DFlash2 on the nightly.
+"""[chantier B-bis] Groupe KV "drafter" pour GLM-5.3-Flash + DFlash2 sur la nightly.
 
-Port of the MiaAI fork's DFLASH2-DRAFTER-GROUP in padded slot-share mode: the
-draft's SlidingWindowSpec layers (block 64, page padded to the MLA page) co-own MLA
-tensor i at disjoint block ids, like the mamba (KDA) layers. Without it the
-generic path either fails page unification (the 656-byte MLA page has a prime
-factor 41) or pads every KDA state to the draft page (tens of GB). Also fixes the
-max-memory accounting: a request costs the drafter its SWA window in shared block
-ids, not max_memory_usage_pages per layer.
+Port du DFLASH2-DRAFTER-GROUP du fork MiaAI (mode "padded slot-share") : les
+couches SlidingWindowSpec du draft (block 64, page rembourree a la page MLA)
+co-possedent le tenseur MLA i a des ids de blocs disjoints, comme les couches
+mamba. Sans cela le chemin generique rembourre les etats KDA a la page du
+draft (dizaines de Go) ou echoue sur l'unification des pages.
 """
 import pathlib
 import sys
@@ -63,14 +61,20 @@ edits = [
         "        assert len(draft_specs) <= len(mla_names), (\n"
         "            \"drafter layers exceed MLA tensors available for slot-sharing\"\n"
         "        )\n"
-        "        compact_block = 64\n"
+        "        # Draft block: during prefill the SWA group must hold the whole prompt before\n"
+        "        # trimming to its window; 64-token blocks (fork default) eat 281 ids for an\n"
+        "        # 18K prompt and thrash the pool under concurrent prefills. Page must stay\n"
+        "        # <= mla_page (padded), i.e. block <= mla_page // bytes_per_token.\n"
+        "        draft_bytes_per_token = any_draft.page_size_bytes // any_draft.block_size\n"
+        "        compact_block = int(__import__(\"os\").environ.get(\"GLM53_DRAFT_BLOCK\", \"1024\"))\n"
+        "        compact_block = max(64, min(compact_block, (mla_page // draft_bytes_per_token) // 64 * 64))\n"
         "        logger.info(\n"
         "            \"[drafter-group] DFlash2 drafter KV: padded slot-share block=%d \"\n"
         "            \"mla_page=%d (was block=%d, %d bytes/token)\",\n"
         "            compact_block,\n"
         "            mla_page,\n"
         "            any_draft.block_size,\n"
-        "            any_draft.page_size_bytes // any_draft.block_size,\n"
+        "            draft_bytes_per_token,\n"
         "        )\n"
         "        new_draft_specs: dict[str, KVCacheSpec] = {\n"
         "            name: replace(spec, block_size=compact_block, page_size_padded=mla_page)\n"
