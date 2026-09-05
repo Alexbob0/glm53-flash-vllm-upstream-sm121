@@ -48,7 +48,11 @@ Things that cost us a boot (8–10 minutes each on this hardware), in the order 
   Mitigation: `supervise.sh` boots both ranks, waits for `/health` (bounded), runs `warmup.sh` and
   restarts BOTH ranks on a hang (up to 3 tries). Independent of the E2 kernel and of the draft.
   The MiaAI fork stack (same mechanism) hung the same way once in our hands.
-- **The first 8K prefill after boot is ~2× slower** (JIT/autotune); measure on the second pass.
+- **Sporadic 7–10 s TTFT stalls on ~30 % of requests** after boot, at any prompt size (a 140-token
+  prompt at 9.8 s, a 1.2K one at 8.4 s), then never again for that shape bucket: first-encounter
+  JIT/autotune/specialization cost. `warmup.sh` now sweeps 12 prompt sizes (60 → 15K tokens);
+  after it, 0 stalls in 12 fresh prompts and TTFT sits at ~900–1 000 tok/s from 300 tokens up.
+  Without the sweep an agent harness sees TTFT 20–26 s on 14K prompts instead of ~14 s.
 - **Draft KV group block size vs concurrent prefills.** With 64-token draft blocks (the fork's
   padded slot-share default) an 18K prompt transiently needs 281 shared block ids during its
   prefill (the SWA window is trimmed only afterwards); three concurrent prefills exceed the

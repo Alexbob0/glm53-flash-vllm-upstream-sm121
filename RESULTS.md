@@ -28,7 +28,9 @@ DFlash2 acceptance: ~4.8 tokens accepted per step at k = 7 (both drafts).
 | E2 fat-expert tier | **1 013** | **1 075–1 084** | **1 165** |
 | reference: MiaAI fork | ~1 000–1 100 | | ~1 150 |
 
-The first long prefill after boot is ~2× slower (JIT / autotune); `warmup.sh` absorbs it.
+First encounters of a prompt-size bucket cost a one-off 7–10 s stall (JIT / autotune); `warmup.sh`
+sweeps 12 sizes at boot — afterwards 12/12 fresh prompts (88 → 6 034 tokens) had TTFT within 10 %
+of prompt_tokens / 950 tok/s.
 Decode speed is flat from 8K to 100K of context; a repeated 100K prompt hits the prefix cache
 (TTFT 0.6 s).
 
