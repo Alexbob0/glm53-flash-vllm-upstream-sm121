@@ -39,6 +39,9 @@ ENVS=(-e NCCL_SOCKET_IFNAME="$NCCL_IF" -e GLOO_SOCKET_IFNAME="$NCCL_IF"
   -e GLM53_PAD_ROPE="${PAD_ROPE:-0}"
   # Persistent top-k oversubscribes GB10 past ~600K context (see patch_kpool_topk_fallback.py).
   -e GLM53_PERSISTENT_TOPK_MAX_LEN="${PERSISTENT_TOPK_MAX_LEN:-600000}"
+  # Breakable CUDA graphs (nightly default on) deadlocked 3 boots/10 inside KDA eager-break capture
+  # (py-spy: gather_initial_states / l2norm_fwd launch on both ranks). Off unless BREAKABLE=1.
+  -e VLLM_USE_BREAKABLE_CUDAGRAPH="${BREAKABLE:-0}"
   -e TORCH_CUDA_ARCH_LIST=12.1a)
 [ -n "${NCCL_IB_GID_INDEX:-}" ] && ENVS+=(-e NCCL_IB_GID_INDEX="$NCCL_IB_GID_INDEX")
 

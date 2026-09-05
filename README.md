@@ -71,7 +71,7 @@ export HF_CACHE=$HOME/hf MODEL_SNAP=models--<your-exl3-pack>/snapshots/<rev> \
        HEAD_IP=10.0.0.1 NCCL_IF=enp1s0f0np0 NCCL_HCA=rocep1s0f0,roceP2p1s0f0
 ./run.sh worker      # node 2
 ./run.sh head        # node 1
-./warmup.sh          # node 1, once /health answers — see PITFALLS.md
+./supervise.sh       # node 1: boots both ranks, warms up, restarts both on the capture-race hang (PITFALLS.md)
 BENCH_URL=http://127.0.0.1:8888/v1/chat/completions ./bench/bench_decode.py
 ```
 
@@ -92,7 +92,7 @@ Never pass `--language-model-only`: it selects `Glm5NextForCausalLM`, whose modu
 Dockerfile              official nightly (digest-pinned) + ExLlamaV3 build + overlay
 overlay/                the plugin, the SM120 backend, nine patch scripts (docstrings = rationale)
 exl3-fat-kernel/        E2 fat-expert GEMM (.cu/.cuh) + graft script       (MiaAI Lab, MIT)
-run.sh / warmup.sh      two-node launcher, post-boot warmup
+run.sh / warmup.sh / supervise.sh   two-node launcher, post-boot warmup, hang-tolerant boot supervisor
 bench/                  decode protocol, prefill probe (8K/32K), ~100K probe
 tests/                  numerical validation of the top-k split/merge, kernel shape probes
 RESULTS.md              measurements; PITFALLS.md: what bit us

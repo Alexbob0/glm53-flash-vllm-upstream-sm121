@@ -36,18 +36,30 @@ Things that cost us a boot (8–10 minutes each on this hardware), in the order 
   99 KB). 512K is fine; beyond ~600K use the row-wise kernel.
 - **1M needs `--gpu-memory-utilization 0.87`** on 2× GB10 (0.80 leaves 6.8 GiB of KV, 9.4 needed
   for one request); the indexer workspaces grow with max length.
-- **First-request hang.** 2 boots out of 8 froze on the very first requests after `/health`
-  (engine `TimeoutError` on the shm broadcast, worker silent, GPUs idle), never later and never
-  reproduced on the same boot afterwards. Independent of the E2 kernel. Run `warmup.sh` right after
-  boot; if it fails, stop and restart **both** ranks. Root cause not yet identified (concurrent
-  JIT/autotune on both ranks is the leading suspect).
+- **Boot / first-request hang = breakable-CUDA-graph capture race (root-caused).** 3 boots out of
+  10 froze, always at the first CUDA-graph capture of a new shape (boot `capture_model`, or the lazy
+  capture triggered by the first real request). `py-spy dump` on both ranks
+  (`results/hang-capture-pyspy-*.txt`): rank 0 stuck in `gather_initial_states`, rank 1 in
+  `l2norm_fwd`, both inside the KDA layer's `@eager_break_during_capture` region under
+  `capture_model`, both blocked in the Triton launch call (`triton/backends/nvidia/driver.py`),
+  GPUs idle, workers spinning at 170 % CPU. The nightly auto-enables
+  `VLLM_USE_BREAKABLE_CUDAGRAPH=1` for this model and there is no alternative: with it off the
+  engine refuses to start ("piecewise CUDA graphs unavailable, model is not torch-compiled").
+  Mitigation: `supervise.sh` boots both ranks, waits for `/health` (bounded), runs `warmup.sh` and
+  restarts BOTH ranks on a hang (up to 3 tries). Independent of the E2 kernel and of the draft.
+  The MiaAI fork stack (same mechanism) hung the same way once in our hands.
 - **The first 8K prefill after boot is ~2× slower** (JIT/autotune); measure on the second pass.
 - **Draft KV group block size vs concurrent prefills.** With 64-token draft blocks (the fork's
   padded slot-share default) an 18K prompt transiently needs 281 shared block ids during its
   prefill (the SWA window is trimmed only afterwards); three concurrent prefills exceed the
   ~590-id pool, the scheduler preempts running decodes and the engine thrashes (KV usage
-  oscillating 65 → 99 %, generation < 10 tok/s). `GLM53_DRAFT_BLOCK=1024` (default now) keeps the
-  page under the MLA page and cuts the id pressure 16×: KV usage 31 % with 4 × 12K requests.
+  oscillating 65 → 99 %, generation < 10 tok/s). `GLM53_DRAFT_BLOCK=1152` (default now) keeps the
+  page under the MLA page and cuts the id pressure 18×: KV usage ~30 % with 4 × 12K requests.
+- **Draft block must divide the MLA block (4608) or prefix-cache hits disappear.** Hybrid-model
+  hits are aligned on the lcm of all group block sizes: with a 1024-token draft block the first
+  possible hit is at 9 216 tokens (an identical 9.1K prompt: 0 hit; 36K: 27.6K reused). 1152
+  divides 4608, so hits happen every 4 608 tokens — still coarse (the KDA state is checkpointed per
+  block): prompts shorter than 4 608 tokens never hit, agent turns get ~11 % block hits.
 - **Concurrency scaling is structural**: c1 → c4 at 12K context is ×1.9 on this model (34 KDA
   layers verified per draft block, 288 experts top-8 → nearly all experts touched per step at
   4 × 8 draft rows); k=5 buys +8 % at c4 but costs −17 % structured / −9 % code at c1. Keep k=7.
