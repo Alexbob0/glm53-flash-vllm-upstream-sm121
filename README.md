@@ -96,6 +96,16 @@ fused cap 32); on the same repeated-text protocol this stack gives 1,335–1,383
 The diagnosis behind rows 4–6: a fat-expert GEMM launches 16–32 CTAs on 48 SMs and costs ~200 µs
 whatever the row count, so the prefill was launch-latency bound, not bandwidth bound.
 
+Two operational notes from the same day:
+- **Do not combine `MNBT=9216` with E3 on this stack**: with `SEQS=4`, fused cap 32 and MNBT 9216 the
+  worker died twice with `CUDA_ERROR_ILLEGAL_ADDRESS` in DeepGEMM (sparse indexer) on the first ~1.5K-token
+  prefill of the warmup sweep; MNBT 9216 on the E2 image and MiaAI's own cap-32/SEQS-4/MNBT-7168 recipe are
+  both fine. Root cause not isolated — MNBT 7168 / SEQS 6 / cap 64 (the defaults) served every test.
+- **GMU vs host processes**: vLLM refuses to start when free device memory is below `GMU × 121.6 GiB`
+  (0.87 → 105.8 GiB). Anything else running on the head (here a Postiz + Temporal stack plus the agent
+  session, ~8 GiB) pushes free memory to ~104 GiB: use `GMU=0.85` or free the host. `supervise.sh`
+  drops caches and waits for `MEM_FREE_MIN` (115 GiB) before launching, with an explicit message.
+
 ## What upstream would need to make this unnecessary
 
 1. A GLM_NSA decode kernel (and prefill orchestrator path) for `top_k = 2048 + kpool tail` in
