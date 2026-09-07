@@ -14,8 +14,12 @@ ENVS="SPEC=${SPEC:-dflash} K=${K:-7} SEQS=${SEQS:-6} MAX_LEN=${MAX_LEN:-1000000}
 for try in $(seq 1 "$MAX_TRIES"); do
   echo "[supervise] try $try/$MAX_TRIES ($ENVS) $(date +%T)"
   ssh "$WORKER_HOST" "docker rm -f glm53-up-worker >/dev/null 2>&1; true"; docker rm -f glm53-up-head >/dev/null 2>&1
-  until [ "$(free -g | awk 'NR==2{print $7}')" -ge "${MEM_FREE_MIN:-110}" ]; do sleep 5; done
-  ssh "$WORKER_HOST" "until [ \$(free -g | awk 'NR==2{print \$7}') -ge "${MEM_FREE_MIN:-110}" ]; do sleep 5; done; setsid nohup env $ENVS $DIR/run.sh worker > $DIR/logs/worker.log 2>&1 < /dev/null &"
+  # vLLM refuses to start when free device memory < GMU x 121.6 GiB (0.87 -> 105.8 GiB); host processes and page
+  # cache eat the rest. Drop caches once (privileged busybox, no sudo), then wait for MEM_FREE_MIN GiB available.
+  docker run --rm --privileged busybox sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches' >/dev/null 2>&1 || true
+  until [ "$(free -g | awk 'NR==2{print $7}')" -ge "${MEM_FREE_MIN:-115}" ]; do
+    echo "[supervise] waiting for free host memory: $(free -g | awk 'NR==2{print $7}') GiB available, need ${MEM_FREE_MIN:-115} (lower GMU or MEM_FREE_MIN)"; sleep 30; done
+  ssh "$WORKER_HOST" "docker run --rm --privileged busybox sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches' >/dev/null 2>&1; until [ \$(free -g | awk 'NR==2{print \$7}') -ge "${MEM_FREE_MIN:-115}" ]; do sleep 5; done; setsid nohup env $ENVS $DIR/run.sh worker > $DIR/logs/worker.log 2>&1 < /dev/null &"
   sleep 8
   (env $ENVS setsid nohup "$DIR/run.sh" head > "$DIR/logs/head.log" 2>&1 < /dev/null &)
   t0=$(date +%s); ok=0
