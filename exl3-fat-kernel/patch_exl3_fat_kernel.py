@@ -40,7 +40,9 @@ def main() -> int:
         '    m.def("exl3_moe", &exl3_moe, "exl3_moe");',
         '    m.def("exl3_moe", &exl3_moe, "exl3_moe");\n'
         '    m.def("exl3_fat_gemm", &exl3_fat_gemm, "exl3_fat_gemm");\n'
-        '    m.def("exl3_fat_gemm_scatter", &exl3_fat_gemm_scatter, "exl3_fat_gemm_scatter");',
+        '    m.def("exl3_fat_gemm_scatter", &exl3_fat_gemm_scatter, "exl3_fat_gemm_scatter");\n'
+        '    m.def("exl3_fat_gemm2", &exl3_fat_gemm2, "exl3_fat_gemm2");\n'
+        '    m.def("exl3_fat_scatter_atomic", []() { return true; }, "scatter accumulates with atomicAdd (multi-stream safe)");',
     )
     bindings.write_text(text)
     return 0

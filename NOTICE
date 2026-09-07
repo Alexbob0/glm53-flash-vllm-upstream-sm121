@@ -1,11 +1,17 @@
 This repository bundles or adapts work from:
 
-- MiaAI Lab — GLM-5.3-Flash-EXL3-2x-DGX-Sparks (MIT):
+- MiaAI Lab — GLM-5.3-Flash-EXL3-2x-DGX-Sparks (MIT up to eb0469f; AGPL-3.0-or-later from 2026-09-07):
     overlay/exl3.py                       EXL3 quantization plugin for vLLM (extended here: dense
                                           non-routed EXL3 with per-shard TP, lm_head, draft loader)
     overlay/flashinfer_mla_sparse_sm120.py SM120 sparse-MLA backend with in-impl RoPE padding
                                           (extended here: top-k split 2048+extra with LSE merge)
-    exl3-fat-kernel/*                     E2 fat-expert GEMM kernel and its graft script
+    exl3-fat-kernel/*                     E2 fat-expert GEMM kernel and its graft script (extended here:
+                                          exl3_fat_gemm2 two-source variant, atomicAdd scatter)
+    overlay/e3/*                          E3 grouped fat-expert MoE kernels + their build script (unmodified,
+                                          commits 1a0feb0/2c0ebe5, AGPL-3.0-or-later)
+    overlay/exl3.py                       now based on their 2026-09-07 main (AGPL) merged with this repo's
+                                          nightly deltas, gemm2 path and multi-stream fallback
+    overlay/rightsize/patch_indexer_workspace.py   their indexer right-sizing patch, nightly anchor
     The EAGLE3 aux-hidden-state block, the drafter KV group logic and the fused context-KV
     reconstruction for an EXL3 draft are ports/adaptations of their fork of vLLM.
 - MiaAI Lab — exllamav3 fork (MIT), built from source by the Dockerfile.

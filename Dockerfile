@@ -1,7 +1,8 @@
 # GLM-5.3-Flash (EXL3 weights) on stock upstream vLLM nightly, SM121 (DGX Spark / GB10).
 #
 # Everything here is a Python overlay on the official image plus one CUDA extension
-# build (ExLlamaV3 + the E2 fat-expert GEMM from MiaAI Lab). No vLLM C++ is rebuilt.
+# build (ExLlamaV3 + the E2 fat-expert GEMM from MiaAI Lab, extended with a two-source variant and an
+# atomicAdd scatter) plus MiaAI's E3 grouped-MoE module. No vLLM C++ is rebuilt.
 #
 # Pins (what was benchmarked in RESULTS.md):
 #   VLLM_IMAGE       vllm/vllm-openai:nightly @ the digest below (vLLM 0.28.1rc1.dev388+g8a728663c,
@@ -26,7 +27,16 @@ RUN set -eux; \
     CPATH=$(python3 -c "import glob;print(':'.join(glob.glob('/usr/local/lib/python3.12/dist-packages/nvidia/*/include')))") \
       MAX_JOBS=${MAX_JOBS} pip install --no-build-isolation --no-deps /opt/exllamav3-src; \
     pip install -q marisa-trie; \
-    python3 -c "import torch, exllamav3_ext as e; assert hasattr(e, 'exl3_fat_gemm') and hasattr(e, 'exl3_fat_gemm_scatter'), dir(e); print('exllamav3_ext OK (fat_gemm=yes)')"
+    python3 -c "import torch, exllamav3_ext as e; assert hasattr(e, 'exl3_fat_gemm') and hasattr(e, 'exl3_fat_gemm_scatter') and hasattr(e, 'exl3_fat_gemm2') and e.exl3_fat_scatter_atomic(), dir(e); print('exllamav3_ext OK (fat_gemm=yes gemm2=yes atomic=yes)')"
+
+# --- E3 grouped fat-expert MoE (MiaAI Lab, AGPL-3.0-or-later, 2026-09-07) as an additive module ------
+# Built by their own script (WITHOUT --use_fast_math) inside a copy of the installed extension tree;
+# exllamav3_ext itself is not recompiled. EXL3_FAT_GROUPED=1 in run.sh selects it (fails closed if absent).
+COPY overlay/e3 /opt/glm53/e3
+RUN set -eux; MAX_JOBS=2 python3 /opt/glm53/e3/build_exl3_fat_moe_ext.py --src /opt/glm53/e3 --out /tmp/e3build \
+      --install /usr/local/lib/python3.12/dist-packages; \
+    python3 -c "import torch, exl3_fat_moe_ext as m; print('exl3_fat_moe_ext OK tile_gu', m.exl3_fat_moe_tile_rows_gateup(), 'tile_dn', m.exl3_fat_moe_tile_rows_down())"; \
+    rm -rf /tmp/e3build
 
 # --- Python overlay -------------------------------------------------------------------
 # exl3.py: the EXL3 quantization plugin (MiaAI Lab kit + our dense-overlay/TP work), registered
@@ -40,4 +50,15 @@ RUN set -eux; \
              patch_glm5next_eagle3 patch_dflash_kv_auto patch_kv_drafter_group \
              patch_kpool_topk_fallback patch_dflash_exl3_kv; do python3 /opt/patches/$p.py; done; \
     python3 -c "from vllm.model_executor.layers.quantization import get_quantization_config as g; print('registry:', g('exl3').__name__)"
+
+# --- Prefix-cache fixes + indexer workspace right-sizing (2026-09-06/07, see README "Prefix caching") -----
+# Applied in place; patched files are the same ones run.sh used to bind-mount during the campaign.
+COPY overlay/apc /opt/patches/apc
+COPY overlay/rightsize /opt/patches/rightsize
+RUN set -eux; V=/usr/local/lib/python3.12/dist-packages/vllm; \
+    python3 /opt/patches/apc/patch_scheduler_mamba_align.py $V/v1/core/sched/scheduler.py $V/v1/core/sched/scheduler.py; \
+    python3 /opt/patches/apc/patch_coordinator_swa_partial.py $V/v1/core/kv_cache_coordinator.py $V/v1/core/kv_cache_coordinator.py; \
+    GLM53_INDEXER_BACKEND_PY=$V/v1/attention/backends/mla/indexer.py python3 /opt/patches/rightsize/patch_indexer_workspace.py; \
+    find $V/v1 -name "__pycache__" -type d -exec rm -rf {} + ; \
+    python3 -c "import ast,pathlib; [ast.parse(pathlib.Path(f).read_text()) for f in ['$V/v1/core/sched/scheduler.py','$V/v1/core/kv_cache_coordinator.py','$V/v1/attention/backends/mla/indexer.py']]; print('apc/rightsize patches OK')"
 COPY chat_template.jinja /opt/chat_template.jinja

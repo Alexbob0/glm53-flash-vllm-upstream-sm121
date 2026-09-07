@@ -56,9 +56,12 @@ template <bool scatter>
 __global__ __launch_bounds__(FAT_THREADS)
 void exl3_fat_gemm_kernel(
     const half* __restrict__ a,
-    const uint16_t* __restrict__ packed,
+    const uint16_t* __restrict__ packed0,
+    const uint16_t* __restrict__ packed1,
     float* __restrict__ out,
-    const half* __restrict__ svh,
+    const half* __restrict__ svh0,
+    const half* __restrict__ svh1,
+    int n_split,
     const int64_t* __restrict__ token_idx,
     const half* __restrict__ route_weight,
     int size_m,
@@ -75,7 +78,14 @@ void exl3_fat_gemm_kernel(
     int lane = t & 31;
     int m_base = blockIdx.y * FAT_TILE_M;
     int n_base = blockIdx.x * FAT_TILE_N;
-    int tiles_n = size_n / 16;
+    // [07/09] dual-source N: columns [0, n_split) come from packed0/svh0, the rest from
+    // packed1/svh1 (gate|up without a per-call packed13 copy). Single-source callers
+    // pass n_split = size_n so the second branch is never taken.
+    bool second = n_base >= n_split;
+    const uint16_t* __restrict__ packed = second ? packed1 : packed0;
+    const half* __restrict__ svh = second ? svh1 : svh0;
+    int n_local = second ? n_base - n_split : n_base;
+    int tiles_n = (second ? size_n - n_split : n_split) / 16;
 
     FragC frag_c[FAT_M_BLOCKS][2];
     #pragma unroll
@@ -102,7 +112,7 @@ void exl3_fat_gemm_kernel(
         if (t < 64)
         {
             const int4* b_src = reinterpret_cast<const int4*>(
-                packed + (k_block * tiles_n + n_base / 16) * FAT_PACKED_WORDS);
+                packed + (k_block * tiles_n + n_local / 16) * FAT_PACKED_WORDS);
             reinterpret_cast<int4*>(sh_b)[t] = b_src[t];
         }
         __syncthreads();
@@ -159,7 +169,7 @@ void exl3_fat_gemm_kernel(
             fat_had_ff_128(
                 sh_c + row * FAT_TILE_N,
                 sh_c + row * FAT_TILE_N,
-                svh + n_base);
+                svh + n_local);
         }
         __syncthreads();
 
@@ -173,9 +183,10 @@ void exl3_fat_gemm_kernel(
             {
                 int64_t destination = token_idx[source_row];
                 value *= __half2float(route_weight[source_row]);
-                // One route per token reaches a given expert, and expert
-                // launches share this stream, so this accumulation is race-free.
-                out[destination * size_n + n_base + col_out] += value;
+                // [07/09] atomicAdd: expert launches may now run on several streams
+                // concurrently (EXL3_FAT_STREAMS), and one token receives up to top-k
+                // expert contributions on the same row.
+                atomicAdd(out + destination * size_n + n_base + col_out, value);
             }
             else
             {
@@ -220,11 +231,13 @@ void check_common(
 }
 
 template <bool scatter>
-void launch(
+void launch2(
     at::Tensor a,
-    at::Tensor packed,
+    at::Tensor packed0,
+    at::Tensor packed1,
     at::Tensor out,
-    at::Tensor svh,
+    at::Tensor svh0,
+    at::Tensor svh1,
     at::Tensor token_idx,
     at::Tensor route_weight)
 {
@@ -232,7 +245,8 @@ void launch(
     cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
     int size_m = static_cast<int>(a.size(0));
     int size_k = static_cast<int>(a.size(1));
-    int size_n = static_cast<int>(svh.numel());
+    int n_split = static_cast<int>(svh0.numel());
+    int size_n = n_split + static_cast<int>(svh1.numel());
     dim3 block(FAT_THREADS);
     dim3 grid(size_n / FAT_TILE_N, (size_m + FAT_TILE_M - 1) / FAT_TILE_M);
     size_t shared = FAT_TILE_M * FAT_TILE_K * sizeof(half)
@@ -240,9 +254,12 @@ void launch(
                   + 16 * FAT_TILE_N * sizeof(float);
     exl3_fat_gemm_kernel<scatter><<<grid, block, shared, stream>>>(
         reinterpret_cast<const half*>(a.data_ptr()),
-        reinterpret_cast<const uint16_t*>(packed.data_ptr()),
+        reinterpret_cast<const uint16_t*>(packed0.data_ptr()),
+        reinterpret_cast<const uint16_t*>(packed1.data_ptr()),
         reinterpret_cast<float*>(out.data_ptr()),
-        reinterpret_cast<const half*>(svh.data_ptr()),
+        reinterpret_cast<const half*>(svh0.data_ptr()),
+        reinterpret_cast<const half*>(svh1.data_ptr()),
+        n_split,
         scatter ? reinterpret_cast<const int64_t*>(token_idx.data_ptr()) : nullptr,
         scatter ? reinterpret_cast<const half*>(route_weight.data_ptr()) : nullptr,
         size_m,
@@ -251,7 +268,43 @@ void launch(
     cuda_check(cudaPeekAtLastError());
 }
 
+template <bool scatter>
+void launch(
+    at::Tensor a,
+    at::Tensor packed,
+    at::Tensor out,
+    at::Tensor svh,
+    at::Tensor token_idx,
+    at::Tensor route_weight)
+{
+    // Single source: second half is empty (n_split == size_n).
+    at::Tensor empty_svh = svh.narrow(0, 0, 0);
+    launch2<scatter>(a, packed, packed, out, svh, empty_svh, token_idx, route_weight);
+}
+
 }  // namespace
+
+void exl3_fat_gemm2(
+    at::Tensor a,
+    at::Tensor packed0,
+    at::Tensor packed1,
+    at::Tensor out,
+    at::Tensor svh0,
+    at::Tensor svh1,
+    int64_t K,
+    bool mcg,
+    bool mul1)
+{
+    // [07/09] gate|up GEMM straight from the two expert trellises: no packed13/svh13 staging copy.
+    // check_common never inspects out's shape, so the full out tensor is fine here (no temp copies).
+    check_common(a, packed0, out, svh0, K, mcg, mul1);
+    check_common(a, packed1, out, svh1, K, mcg, mul1);
+    TORCH_CHECK(out.is_contiguous(), "out must be contiguous");
+    TORCH_CHECK(out.size(0) == a.size(0) && out.size(1) == svh0.numel() + svh1.numel(),
+                "out shape must be [M, N0 + N1]");
+    TORCH_CHECK(svh0.numel() % FAT_TILE_N == 0, "N0 must be divisible by 128");
+    launch2<false>(a, packed0, packed1, out, svh0, svh1, at::Tensor(), at::Tensor());
+}
 
 void exl3_fat_gemm(
     at::Tensor a,

@@ -1,0 +1,4 @@
+=== mnbt9216 (protocole officiel, TTFT exclu, médiane de 3) ===
+structured(count)  med  79.5  (min  75.9 / max  80.1) tok/s
+prose(hashmap,en)  med  36.8  (min  34.7 / max  37.6) tok/s
+code(fr)           med  48.4  (min  44.7 / max  48.8) tok/s

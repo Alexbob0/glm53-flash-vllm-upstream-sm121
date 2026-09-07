@@ -1,0 +1,4 @@
+=== b1-gemm2 (protocole officiel, TTFT exclu, médiane de 3) ===
+structured(count)  med  79.7  (min  79.7 / max  79.8) tok/s
+prose(hashmap,en)  med  34.7  (min  33.4 / max  37.9) tok/s
+code(fr)           med  47.5  (min  45.6 / max  48.5) tok/s

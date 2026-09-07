@@ -1,0 +1,4 @@
+=== 2026-09-07-b3-e3 (protocole officiel, TTFT exclu, médiane de 3) ===
+structured(count)  med  79.6  (min  79.2 / max  79.9) tok/s
+prose(hashmap,en)  med  33.4  (min  31.8 / max  34.4) tok/s
+code(fr)           med  44.2  (min  42.4 / max  45.0) tok/s

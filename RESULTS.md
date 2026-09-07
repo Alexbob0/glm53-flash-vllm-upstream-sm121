@@ -1,5 +1,8 @@
 # Results
 
+> **2026-09-07 update** — prefill +40 % (E3 grouped MoE from MiaAI, ported as an additive module), KV pool
+> +18–27 % (indexer right-sizing), prefix caching repaired (0 hits → 97 % on a 100K repeat). Section at the end.
+
 Hardware: 2× ASUS Ascent GX10 (DGX Spark class: GB10, sm_121, 128 GB unified, ~273 GB/s each),
 ConnectX-7 RoCE v2, both rails (`NCCL_IB_HCA=rocep1s0f0,roceP2p1s0f0`), TP=2 with the `mp`
 executor across nodes. Image: `vllm/vllm-openai:nightly` at vLLM `0.28.1rc1.dev388+g8a728663c`
@@ -75,3 +78,55 @@ Decode kernel, 64 tokens: main 1024 + extra 1024 merged by LSE vs a single 2048 
 max abs error 4.8e-4 (bf16 level) with log2 weights, 2e-2 with natural-log weights (wrong base).
 Prefill orchestrator vs decode kernel on the same rows: LSE identical to 1e-6. Two-call decode at
 B=8: 0.168 ms vs 0.080 ms single call, i.e. ~+1 ms per 93 ms step over 11 MLA layers.
+
+
+## 2026-09-07 — prefix cache, KV pool, prefill (image `b3`: nightly + overlay + E2 gemm2/atomic + E3)
+
+Protocol: `bench/measure.py` (streamed token ids, monotonic clock, unique salted prompts, 0 prefix hits on
+the "unique" rows; "repeat" = same prompt again), real-code corpus; decode = `bench/bench_decode.py`
+(MiaAI's protocol, TTFT excluded, median of 3). 1M context, GMU 0.87, `MAX_NUM_SEQS=6`, MNBT 7168, DFlash2
+EXL3 draft k=7, CUDA graphs. Raw measurements: `results/2026-09-07/*.txt` (chain output per boot).
+
+### Cold prefill (prompt tokens / TTFT)
+
+| Config | 8K | 32K | 100K |
+|---|---|---|---|
+| E2 (host loop), 07:00 | 8.94 s → 890 tok/s | 34.4 s → 940 | 103.9 s → 960 |
+| + `exl3_fat_gemm2` | 8.87 s | 34.9 s | 104.1 s (2nd pass) |
+| + `EXL3_FAT_STREAMS=4` (2 boots) | 7.64 / 7.56 s → 1,045–1,056 | 28.9 / 28.7 s → 1,106–1,115 | 92.2 / 93.2 s → 1,070–1,082 |
+| **E3 grouped (`EXL3_FAT_GROUPED=1`)** | **6.34 s → 1,260** | **23.9 s → 1,343** | **74.2 s → 1,345** |
+
+Repeated-text probe (`bench/prefill_probe.py`, MiaAI-like): E3 1,335–1,383 tok/s at 8K/32K.
+
+### Prefix cache (after `overlay/apc`, `PMU=64`, `RETENTION=4608`, `EAGLE_DROP=0`)
+
+| Test | stock nightly | fixed |
+|---|---|---|
+| 8K repeat | 8.6 s, 0 hits | 4.0 s (hit 4608) |
+| 32K repeat | 33.0 s, 0 hits | 0.35–0.5 s (hit ≈ full) |
+| 100K repeat | 100.4 s, 0 hits | 3.4–3.6 s (hit 96768) |
+| 8.5K conversation, turns 2–3 | — | TTFT 3.4–4.4 s (hit 4608) |
+| 32K conversation, turns 2–3 | — | TTFT 4.4–4.9 s (hit 27648) |
+| c4 × 12K + 256 tokens, 2nd pass | 14.9 tok/s e2e, TTFT p50 ~43 s | 30–34 tok/s, p50 8.6–12.8 s |
+
+### KV pool at 1M (log line `GPU KV cache size`)
+
+| | tokens |
+|---|---|
+| stock workspace (8 boots, 2026-09-06) | 1,708,487 – 1,837,638 |
+| `GLM53_INDEXER_WORKSPACE=rightsize` | 2,103,321 – 2,269,372 (E3 scratch included) |
+
+### Decode (unchanged) and quality
+
+Structured 79.5–79.9, prose 33–37, code-fr 42.6–48.8 tok/s across the day's 9 boots (the E2 vs E3 paths
+never run on decode-sized steps). Greedy code output, multi-turn hits + DFlash acceptance (0.2–0.4 on
+French prose, unchanged), and tool calling checked after each change. `exl3_fat_gemm2` vs the staged
+E2 GEMM: bit-identical on random trellises (M=5760). E3 parity vs the LinearEXL3 reference: MiaAI's
+`tests/bench_e3_microbench.py` — not yet re-run on this image (needs an idle GPU).
+
+### Things that did not help
+
+- `MAX_NUM_BATCHED_TOKENS=9216` (effective chunk 4608 → 9216): prefill unchanged, KV pool −17 %, c4 TTFT worse.
+- 8 fat-expert streams: back to the 1-stream level (oversubscribes the 48 SMs).
+- Removing the 4 MB gate|up staging copy per fat expert (`exl3_fat_gemm2`): bit-exact, but the copies were
+  overlapped — no wall-time change.

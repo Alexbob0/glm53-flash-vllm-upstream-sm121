@@ -1,0 +1,4 @@
+=== 2026-09-07-b2-streams4 (protocole officiel, TTFT exclu, médiane de 3) ===
+structured(count)  med  79.7  (min  79.5 / max  80.0) tok/s
+prose(hashmap,en)  med  35.4  (min  31.3 / max  38.2) tok/s
+code(fr)           med  47.9  (min  47.5 / max  51.1) tok/s

@@ -44,10 +44,57 @@ the failure it fixes.
 | 7 | `patch_kv_drafter_group.py` | KV page unification fails (drafter page vs MLA page, prime factor 41); the generic path pads KDA states to the drafter page | **drafter KV group**: draft layers slot-share the MLA tensors (block 64, page padded to the MLA page), plus correct accounting |
 | 8 | `patch_kpool_topk_fallback.py` | `persistent_topk` oversubscribes the 48 SMs at 1M context | `top_k_per_row_decode` when `max_model_len > 600K` (−1 % decode) |
 | 9 | `patch_dflash_exl3_kv.py` | an EXL3-quantized DFlash2 draft has no `.weight` for the fused context-KV GEMM | reconstruct K/V rows once via identity forwards on the EXL3 shards |
-| — | `exl3-fat-kernel/` | the E2 fat-expert GEMM (MiaAI PR #77, +10 % prefill) lives outside upstream ExLlamaV3 | grafted into the extension at build time |
+| — | `exl3-fat-kernel/` | the E2 fat-expert GEMM (MiaAI PR #77, +10 % prefill) lives outside upstream ExLlamaV3 | grafted into the extension at build time; extended with `exl3_fat_gemm2` (reads gate and up from their own trellises, no 4 MB staging copy per expert — bit-exact, neutral end to end) and an `atomicAdd` scatter (multi-stream safe) |
+| 10 | `overlay/apc/patch_scheduler_mamba_align.py` | **upstream bug**: `Scheduler._mamba_block_aligned_split` aligns prefill chunks on `cache_config.block_size` (1152 = the drafter group) while the KDA groups use the `lcm` block 4608 → KDA states are written at non-aligned positions and **never hashed** (zero prefix-cache hits, even on exact repeats) | align on the real Mamba block (`[apc-align]` boot line) |
+| 11 | `overlay/apc/patch_coordinator_swa_partial.py` | `--prefix-match-unit 64` is refused because the drafter's `SlidingWindowManager` "requires block-aligned lookups" — it actually resolves the block view itself | do not let that manager veto fine-grained hits |
+| 12 | `overlay/rightsize/patch_indexer_workspace.py` | the sparse-indexer prefill workspace is `max_model_len × 40` entries (5 GiB at 1M, charged to the KV pool) while the splitter is fed pool-compressed lengths (`index_kpool` 4) | MiaAI's right-sizing (vllm#55222) with the nightly anchor (`tokens_per_state`): **+18–27 % KV pool**, chunking and speed unchanged |
+| 13 | `overlay/e3/` | E2's per-expert host loop is latency-bound: a fat GEMM costs a flat ~200 µs at ≤ 512 rows (16–32 CTAs on 48 SMs), ~12k launches per chunk | **MiaAI's E3 grouped MoE** (3 launches per layer from device-side tables) built as the additive `exl3_fat_moe_ext` module — **+40 % cold prefill on real code here** |
+| 14 | `run.sh` (`EXL3_FAT_STREAMS`) | same latency bound, E2 fallback tier | fat experts round-robined over 4 CUDA streams (one scratch set each, atomic scatter): +14–19 % on E2; superseded by E3 |
 
 Also required: exllamav3 ≥ 1.4 instantiates `NullConfig` inside `LinearEXL3` — the plugin imports
 the real `exllamav3.model.config` under its namespace stub instead of a hand-made stub.
+
+## Prefix caching on this hybrid (2026-09-06/07)
+
+The stock nightly served **zero prefix-cache hits** for GLM-5.3-Flash + DFlash2 — an exact 100K repeat
+re-prefilled 100K tokens (100 s). Three causes, all verified by instrumentation and fixed here:
+
+1. the chunk-alignment bug (row 10 above) — KDA states never cacheable;
+2. the drafter group's veto on `--prefix-match-unit` (row 11) — no tail state at the exact prompt end;
+3. `--prefix-cache-retention-interval` defaults to 0 (one KDA state per request, at the prompt-tail block,
+   reachable by the next turn only when `n mod 4608 ≳ 2304`) → `RETENTION=4608` keeps one state per block;
+4. `disable_eagle_block_drop` (`EAGLE_DROP=0`): the eagle-style drop of the last matching block pushed
+   the usable KDA state one block back on prompts ending shortly after a 4608 boundary.
+
+| | before | after |
+|---|---|---|
+| 8K exact repeat (TTFT) | 8.6 s, 0 hits | 4.0 s, hit 4608 |
+| 32K exact repeat | 33 s, 0 hits | **0.4 s** (5.3 s before `EAGLE_DROP=0`) |
+| 100K exact repeat | 100 s, 0 hits | **3.5 s**, hit 96768 |
+| 8.5K / 32K conversation, turns 2–3 | full re-prefill | 4.4 s / 4.9 s |
+| c4 × 12K, second pass | 14.9 tok/s e2e, TTFT p50 43 s | 33 tok/s, p50 11.5 s |
+
+Hit granularity is a multiple of 4608 (KDA states at chunk ends); prompts ≤ 7168 tokens get their first
+hit at the third occurrence. Greedy logprobs with and without a hit are identical. Points 1–2 apply to
+MiaAI's fork image as well (its scheduler has the same `_mamba_block_aligned_split`; the coordinator
+anchor differs by one line), 3–4 need a vLLM with those flags (≥ 0.28 nightly).
+
+## Prefill: from 900 to 1,350 tok/s in one day (2026-09-07, real-code corpus, TTFT-based)
+
+| Config | 8K | 32K | 100K | c4 × 12K TTFT p50 |
+|---|---|---|---|---|
+| E2 host loop (start of day) | 890 | 940 | 960 | 37 s |
+| `exl3_fat_gemm2` (no staging copy) | 900 | 925 | 958 | — |
+| MNBT 9216 | 899 | 926 | 953 | 44 s (pool −17 %) |
+| E2 + `EXL3_FAT_STREAMS=4` | 1,056 | 1,115 | 1,070 | 32 s |
+| E2 + 8 streams | 880 | 969 | 925 | 37 s |
+| **E3 grouped MoE (MiaAI) — default** | **1,260** | **1,343** | **1,345** | **26 s** |
+
+Decode (79.6 / 33.4 / 44.2 tok/s structured / prose / code-fr), quality, hits and tool calling unchanged
+throughout. MiaAI measures 1,490–1,590 tok/s with E3 on their fork (sparkDash prompts, `MAX_NUM_SEQS=4`,
+fused cap 32); on the same repeated-text protocol this stack gives 1,335–1,383 (`bench/prefill_probe.py`).
+The diagnosis behind rows 4–6: a fat-expert GEMM launches 16–32 CTAs on 48 SMs and costs ~200 µs
+whatever the row count, so the prefill was launch-latency bound, not bandwidth bound.
 
 ## What upstream would need to make this unnecessary
 
@@ -91,13 +138,18 @@ Never pass `--language-model-only`: it selects `Glm5NextForCausalLM`, whose modu
 ```
 Dockerfile              official nightly (digest-pinned) + ExLlamaV3 build + overlay
 overlay/                the plugin, the SM120 backend, nine patch scripts (docstrings = rationale)
-exl3-fat-kernel/        E2 fat-expert GEMM (.cu/.cuh) + graft script       (MiaAI Lab, MIT)
-run.sh / warmup.sh / supervise.sh   two-node launcher, post-boot warmup, hang-tolerant boot supervisor
-bench/                  decode protocol, prefill probe (8K/32K), ~100K probe
+overlay/apc/            prefix-cache fixes (scheduler chunk alignment, coordinator SWA veto)
+overlay/rightsize/      sparse-indexer workspace right-sizing (nightly anchor)
+overlay/e3/             MiaAI's E3 grouped fat-expert MoE (.cu/.cuh + their build script, unmodified, AGPL)
+exl3-fat-kernel/        E2 fat-expert GEMM (.cu/.cuh) + graft script (MiaAI Lab) + gemm2 / atomic scatter
+run.sh / warmup.sh / supervise.sh / chain.sh   two-node launcher, warmup sweep, hang-tolerant boot, post-boot bench chain
+bench/                  decode protocol, prefill probes, measure.py (auditable streaming bench), apc_turns.py
 tests/                  numerical validation of the top-k split/merge, kernel shape probes
 RESULTS.md              measurements; PITFALLS.md: what bit us
 ```
 
 ## License
 
-MIT (this repo). Bundled MiaAI Lab and turboderp code is MIT — see [NOTICE](NOTICE). No weights.
+AGPL-3.0-or-later (this repo, since 2026-09-07: it vendors MiaAI Lab's E3 kernels and their current
+`exl3.py`, both AGPL-3.0-or-later since their relicense of the same day). Earlier MiaAI/turboderp code is MIT,
+vLLM is Apache-2.0 — see [NOTICE](NOTICE). No weights.

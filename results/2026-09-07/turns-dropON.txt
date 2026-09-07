@@ -1,0 +1,3 @@
+dropON turn1: prompt=8364 gen=150 TTFT=9.06s total=13.9s hits=0/8364 accept=0.294
+dropON turn2: prompt=8525 gen=40 TTFT=4.41s total=6.1s hits=4608/8525 accept=0.218
+dropON turn3: prompt=8573 gen=40 TTFT=4.60s total=6.2s hits=4608/8573 accept=0.214

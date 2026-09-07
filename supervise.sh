@@ -3,14 +3,14 @@
 # /health (bounded), runs warmup.sh; on a boot hang or a warmup failure (the breakable-cudagraph
 # capture race: py-spy shows both ranks stuck in KDA kernel launches under capture_model) it
 # restarts BOTH ranks, up to MAX_TRIES. Exit 0 when the stack is warm and serving.
-# Usage: ./supervise.sh   (env knobs as run.sh: SPEC K SEQS MAX_LEN GMU PORT BREAKABLE ...)
+# Usage: ./supervise.sh   (env knobs as run.sh; MODEL_SNAP DRAFT_SNAP HEAD_IP NCCL_IF NCCL_HCA required)
 set -u
-WORKER_HOST="${WORKER_HOST:?ssh host of the worker node}"
+WORKER_HOST="${WORKER_HOST:-node2-ib}"
 PORT="${PORT:-8888}"
 MAX_TRIES="${MAX_TRIES:-3}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-900}"     # seconds to reach /health (normal boot ~8 min)
-DIR="$(cd "$(dirname "$0")" && pwd)"
-ENVS="SPEC=${SPEC:-dflash} K=${K:-7} SEQS=${SEQS:-6} MAX_LEN=${MAX_LEN:-1000000} GMU=${GMU:-0.87} PORT=$PORT BREAKABLE=${BREAKABLE:-1}"
+DIR="${GLM53_DIR:-$(dirname "$(readlink -f "$0")")}"
+ENVS="SPEC=${SPEC:-dflash} K=${K:-7} SEQS=${SEQS:-6} MAX_LEN=${MAX_LEN:-1000000} GMU=${GMU:-0.87} PORT=$PORT BREAKABLE=${BREAKABLE:-1} PMU=${PMU-64} RETENTION=${RETENTION-4608} EAGLE_DROP=${EAGLE_DROP:-0} FAT_STREAMS=${FAT_STREAMS:-4} FAT_GROUPED=${FAT_GROUPED:-1} MNBT=${MNBT:-7168} IMG=${IMG:-glm53-upstream:latest} HF_CACHE=${HF_CACHE:-$HOME/hf} MODEL_SNAP=$MODEL_SNAP DRAFT_SNAP=$DRAFT_SNAP HEAD_IP=$HEAD_IP NCCL_IF=$NCCL_IF NCCL_HCA=$NCCL_HCA"
 for try in $(seq 1 "$MAX_TRIES"); do
   echo "[supervise] try $try/$MAX_TRIES ($ENVS) $(date +%T)"
   ssh "$WORKER_HOST" "docker rm -f glm53-up-worker >/dev/null 2>&1; true"; docker rm -f glm53-up-head >/dev/null 2>&1

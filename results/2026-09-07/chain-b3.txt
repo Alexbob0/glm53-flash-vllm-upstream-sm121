@@ -1,0 +1,16 @@
+[supervise] serving on :8888 after try 1
+(EngineCore pid=321) INFO 09-07 15:07:02 [kv_cache_utils.py:2380] GPU KV cache size: 2,173,431 tokens, Maximum concurrency for 1,000,000 tokens per request: 2.1
+effective_tier=grouped
+direct_calls=0
+=== 2026-09-07-b3-e3 (protocole officiel, TTFT exclu, médiane de 3) ===
+structured(count)  med  79.6  (min  79.2 / max  79.9) tok/s
+prose(hashmap,en)  med  33.4  (min  31.8 / max  34.4) tok/s
+code(fr)           med  44.2  (min  42.4 / max  45.0) tok/s
+code-8000-p0-unique      prompt=7996 ttft=6.34s -> 1260 tok/s valid=True
+code-8000-p0-repeat      prompt=7996 ttft=3.05s -> 2625 tok/s valid=True
+code-32000-p0-unique     prompt=32109 ttft=23.91s -> 1343 tok/s valid=True
+code-32000-p0-repeat     prompt=32109 ttft=3.69s -> 8711 tok/s valid=True
+code-100000-p0-unique    prompt=99782 ttft=74.20s -> 1345 tok/s valid=True
+code-100000-p0-repeat    prompt=99782 ttft=2.84s -> 35160 tok/s valid=True
+code-12000-p0-unique   e2e=17.7 tok/s ttft_p50=26.1s p95=35.9s wall=57.7s
+code-12000-p0-repeat   e2e=34.0 tok/s ttft_p50=8.6s p95=8.8s wall=30.1s
