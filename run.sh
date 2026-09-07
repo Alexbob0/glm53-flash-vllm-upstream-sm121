@@ -72,6 +72,7 @@ ARGS=(serve "$MODEL"
   --kv-cache-dtype fp8                      # canonicalized to fp8_ds_mla by the SM120 backend
   --attention-config "{\"sparse_mla_force_mqa\":true}"   # dense MHA prefill is unavailable at head 320
   --trust-remote-code --enable-prefix-caching
+  --enable-prompt-tokens-details   # usage.prompt_tokens_details.cached_tokens for clients (prefix-cache hits visible per request)
   # Prefix caching on this hybrid (KDA states + MLA pages + DFlash2 drafter group): see README "Prefix caching".
   # PMU=64: hash unit finer than the drafter block so the KDA tail state at the exact prompt end is cacheable.
   # RETENTION=4608: one KDA state per 4608-token block (upstream default 0 keeps only the prompt-tail state,
