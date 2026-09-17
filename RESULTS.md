@@ -1,5 +1,9 @@
 # Results
 
+> **2026-09-12 update** — adaptive verification length (opt-in, default-on in `supervise.sh`): +19 % prose,
+> +31 % prose @131K, +7 % long code, zero prefill cost. Head-to-head vs the MiaAI fork kit: 82.3 / 38.2 / 48.9
+> vs 73.5 / 32.6 / 41.7 tok/s, KV pool 2.14M vs 0.88M tokens @1M, c4 aggregate 41.0 vs 21.0. Section at the end.
+>
 > **2026-09-07 update** — prefill +40 % (E3 grouped MoE from MiaAI, ported as an additive module), KV pool
 > +18–27 % (indexer right-sizing), prefix caching repaired (0 hits → 97 % on a 100K repeat). Section at the end.
 
@@ -130,3 +134,33 @@ E2 GEMM: bit-identical on random trellises (M=5760). E3 parity vs the LinearEXL3
 - 8 fat-expert streams: back to the 1-stream level (oversubscribes the 48 SMs).
 - Removing the 4 MB gate|up staging copy per fat expert (`exl3_fat_gemm2`): bit-exact, but the copies were
   overlapped — no wall-time change.
+
+## 2026-09-12 — adaptive-k, and a head-to-head against the MiaAI fork kit
+
+Two serving configurations were measured on one common bench (streaming, temp 0, thinking off, TTFT
+excluded, 2 passes): `C-nightly-prod` = this stack with E3 and the fixed k=7 verifier; `D-nightly-adaptive`
+= the same plus `ADAPTIVE_K=1`. The fork kit was measured on the same bench, its best config.
+
+| probe (tok/s) | this repo, C | this repo, **D (+adaptive-k)** | MiaAI fork, best |
+|---|---:|---:|---:|
+| structured (count) | 80.1 | **82.3** | 73.5 |
+| prose (hashmap, en) | 34.5 | **38.2** | 32.6 |
+| code (fr, BST) | 46.0 | **48.9** | 41.7 |
+| code (en, BST) | 58.4 | 55.0 | 48.6 |
+| code @32K | 44.1 | **47.4** | — |
+| code @131K | 42.8 | **47.9** | — |
+| prose @32K | 24.2 | **28.5** | — |
+| prose @131K | 22.1 | **29.7** | — |
+
+Prefill (cold, TTFT-based): 1 291 / 1 371 / 1 348 tok/s at 8K / 32K / 100K — adaptive-k is free there
+(the fork kit leads cold prefill at 1 441 / 1 605 / 1 434, an open gap). KV pool: **2 140 221 tokens**
+(fork: 883 552). c4 aggregate: **41.0** vs 21.0 tok/s. `code_eval` 8/8 both, tool calling OK.
+
+Isolating adaptive-k on a single boot (fixed k=7 → adaptive, live): +19 % short prose, +31 % prose @131K,
++7 % long code, −4 % short FR code, prefill unchanged. A/B with an adaptive set of `2,4,7` vs `2,5` and
+`ema` vs `off` confirmed the EMA policy; see `overlay/adaptive_k/test_adaptive_k_nightly.py` for the
+policy unit tests (the launcher's capture-size union is tested too, so it cannot drift from `run.sh`).
+
+> The template bug fixed the same day (Reasoning Effort emitted even with thinking off) is *not* a perf
+> knob: with it, `code_eval` fell to 6/8 and code came out 3–10× too long. The shipped
+> `chat_template.jinja` gates the Reasoning Effort line on `thinking_enabled`.

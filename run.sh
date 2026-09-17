@@ -26,6 +26,9 @@ MAX_LEN="${MAX_LEN:-1000000}"   # 1M needs GMU>=0.87 on 2x GB10; 0.80 is enough 
 GMU="${GMU:-0.87}"
 PMU="${PMU-64}"                 # --prefix-match-unit (empty = off)
 RETENTION="${RETENTION-4608}"   # --prefix-cache-retention-interval (empty = upstream default 0)
+ADAPTIVE_K="${ADAPTIVE_K:-0}"   # 1 = adaptive verification length (opt-in, 2026-09-12); 0 = byte-for-byte the baked scheduler
+HERE=$(dirname "$(readlink -f "$0")")
+EXTRA_MOUNTS=()
 MODEL=/root/.cache/huggingface/hub/${MODEL_SNAP}
 DRAFT=/root/.cache/huggingface/hub/${DRAFT_SNAP}
 
@@ -80,7 +83,45 @@ ARGS=(serve "$MODEL"
   ${PMU:+--prefix-match-unit $PMU} ${RETENTION:+--prefix-cache-retention-interval $RETENTION}
   --tool-call-parser glm47 --enable-auto-tool-choice --reasoning-parser glm45
   --chat-template /opt/chat_template.jinja
-  --limit-mm-per-prompt "{\"image\":4,\"video\":1}" --skip-mm-profiling)
+  # image cap is PER CONVERSATION (clients resend the whole history): 4 blocked on the 2nd turn.
+  # --mm-processor-cache-gb 1 caps the processor cache (vLLM default 4 GiB of UMA on this host).
+  --limit-mm-per-prompt "{\"image\":16,\"video\":1}" --mm-processor-cache-gb 1 --skip-mm-profiling)
+
+# --- Adaptive verification length (opt-in, 2026-09-12) -----------------------------------
+# ADAPTIVE_K=1 mounts two runtime overlays (default 0 = byte-for-byte the scheduler baked in the
+# image, no mount and no extra arg). DFlash2 still drafts k=7; the scheduler verifies only a per-step
+# prefix chosen from a CPU-side EMA of accepted drafts, uniform over the batch, so every decode step
+# still lands on a FULL CUDA graph captured for each candidate length + 1. Measured here: +19 % prose,
+# +31 % prose @131K, +7 % code long, -4 % short FR code; prefill cost zero. Regenerate the two
+# overlay files with overlay/adaptive_k/patch_adaptive_k_nightly.py whenever the scheduler moves.
+_ak_sizes() {
+  # Uniform decode of r requests at draft length kk is r*(kk+1) tokens; capture the union of those
+  # with the list vLLM would build on its own so max_cudagraph_capture_size and mixed coverage stay.
+  local seqs=$1 k=$2 kset=$3 maxcg n kk r
+  maxcg=$(( seqs * (k + 1) * 2 )); if [ "$maxcg" -gt 512 ]; then maxcg=512; fi
+  { echo 1; echo 2; echo 4
+    n=8; while [ "$n" -le "$maxcg" ]; do echo "$n"; n=$(( n + 8 )); done
+    for kk in ${kset//,/ }; do
+      r=1; while [ "$r" -le "$seqs" ]; do echo $(( r * (kk + 1) )); r=$(( r + 1 )); done
+    done
+  } | sort -n -u | tr '\n' ' '
+}
+if [ "$ADAPTIVE_K" = 1 ]; then
+  for _f in scheduler.py cudagraph_utils.py; do
+    [ -f "$HERE/overlay/adaptive_k/$_f" ] || { echo "[run.sh] missing overlay/adaptive_k/$_f (run patch_adaptive_k_nightly.py)" >&2; exit 2; }
+  done
+  V=/usr/local/lib/python3.12/dist-packages/vllm
+  EXTRA_MOUNTS+=(-v "$HERE/overlay/adaptive_k/scheduler.py:$V/v1/core/sched/scheduler.py:ro")
+  EXTRA_MOUNTS+=(-v "$HERE/overlay/adaptive_k/cudagraph_utils.py:$V/v1/worker/gpu/cudagraph_utils.py:ro")
+  AK_SET="${GLM53_ADAPTIVE_K_SET:-2,4,7}"
+  ENVS+=(-e GLM53_ADAPTIVE_K="${GLM53_ADAPTIVE_K:-ema}" -e GLM53_ADAPTIVE_K_SET="$AK_SET")
+  for _v in ALPHA MARGIN MIN_STEPS SATURATE HIST FILE; do   # passthrough only when the caller set them
+    eval "_val=\${GLM53_ADAPTIVE_K_$_v-}"
+    [ -n "$_val" ] && ENVS+=(-e "GLM53_ADAPTIVE_K_$_v=$_val")
+  done
+  read -r -a AK_SIZES <<< "$(_ak_sizes "${SEQS:-6}" "$K" "$AK_SET")"
+  ARGS+=(--cudagraph-capture-sizes "${AK_SIZES[@]}")
+fi
 # NEVER add --language-model-only: it switches to Glm5NextForCausalLM and the module prefixes
 # no longer match the EXL3 non_routed keys (language_model.model.layers.*).
 # EAGLE_DROP=0 (default): keep the last matching block for the eagle-style drafter instead of dropping it.
@@ -101,5 +142,5 @@ fi
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 exec docker run --name "$NAME" --gpus all --network host --ipc host \
   --device /dev/infiniband --ulimit memlock=-1:-1 --cap-add IPC_LOCK \
-  -v "$HF_CACHE":/root/.cache/huggingface "${JIT_MOUNTS[@]}" \
+  -v "$HF_CACHE":/root/.cache/huggingface ${JIT_MOUNTS[@]+"${JIT_MOUNTS[@]}"} ${EXTRA_MOUNTS[@]+"${EXTRA_MOUNTS[@]}"} \
   "${ENVS[@]}" --entrypoint vllm "$IMG" "${ARGS[@]}"

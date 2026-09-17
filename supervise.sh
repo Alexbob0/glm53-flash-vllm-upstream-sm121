@@ -10,7 +10,15 @@ PORT="${PORT:-8888}"
 MAX_TRIES="${MAX_TRIES:-3}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-900}"     # seconds to reach /health (normal boot ~8 min)
 DIR="${GLM53_DIR:-$(dirname "$(readlink -f "$0")")}"
-ENVS="SPEC=${SPEC:-dflash} K=${K:-7} SEQS=${SEQS:-6} MAX_LEN=${MAX_LEN:-1000000} GMU=${GMU:-0.87} PORT=$PORT BREAKABLE=${BREAKABLE:-1} PMU=${PMU-64} RETENTION=${RETENTION-4608} EAGLE_DROP=${EAGLE_DROP:-0} FAT_STREAMS=${FAT_STREAMS:-4} FAT_GROUPED=${FAT_GROUPED:-1} MNBT=${MNBT:-7168} IMG=${IMG:-glm53-upstream:latest} HF_CACHE=${HF_CACHE:-$HOME/hf} MODEL_SNAP=$MODEL_SNAP DRAFT_SNAP=$DRAFT_SNAP HEAD_IP=$HEAD_IP NCCL_IF=$NCCL_IF NCCL_HCA=$NCCL_HCA"
+# ADAPTIVE_K defaults to 1 here (adopted in production on 2026-09-12); ADAPTIVE_K=0 for the old behaviour.
+# run.sh itself defaults it to 0, so a bare ./run.sh stays byte-for-byte the baked scheduler.
+ENVS="SPEC=${SPEC:-dflash} K=${K:-7} SEQS=${SEQS:-6} MAX_LEN=${MAX_LEN:-1000000} GMU=${GMU:-0.87} PORT=$PORT BREAKABLE=${BREAKABLE:-1} PMU=${PMU-64} RETENTION=${RETENTION-4608} EAGLE_DROP=${EAGLE_DROP:-0} FAT_STREAMS=${FAT_STREAMS:-4} FAT_GROUPED=${FAT_GROUPED:-1} MNBT=${MNBT:-7168} ADAPTIVE_K=${ADAPTIVE_K:-1} IMG=${IMG:-glm53-upstream:latest} HF_CACHE=${HF_CACHE:-$HOME/hf} MODEL_SNAP=$MODEL_SNAP DRAFT_SNAP=$DRAFT_SNAP HEAD_IP=$HEAD_IP NCCL_IF=$NCCL_IF NCCL_HCA=$NCCL_HCA"
+# Forward adaptive-k tuning knobs only when the caller set them (runtime retune without a reboot).
+for _v in GLM53_ADAPTIVE_K GLM53_ADAPTIVE_K_SET GLM53_ADAPTIVE_K_ALPHA GLM53_ADAPTIVE_K_MARGIN \
+          GLM53_ADAPTIVE_K_MIN_STEPS GLM53_ADAPTIVE_K_SATURATE GLM53_ADAPTIVE_K_HIST GLM53_ADAPTIVE_K_FILE; do
+  eval "_val=\${$_v-}"
+  [ -n "$_val" ] && ENVS="$ENVS $_v=$_val"
+done
 for try in $(seq 1 "$MAX_TRIES"); do
   echo "[supervise] try $try/$MAX_TRIES ($ENVS) $(date +%T)"
   ssh "$WORKER_HOST" "docker rm -f glm53-up-worker >/dev/null 2>&1; true"; docker rm -f glm53-up-head >/dev/null 2>&1
