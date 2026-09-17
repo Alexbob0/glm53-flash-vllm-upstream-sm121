@@ -145,9 +145,11 @@ and passed the packaged GPU gate (`test_cuda_integration.py`, 48 checks, `rel_l2
 
 | probe (tok/s, official protocol, median of 3) | stock control | + coop geo 1 |
 |---|---:|---:|
-| structured | 83.1-84.4 | **88.7-92.9** |
-| prose | 37.0-37.2 | **39.3-42.5** |
-| code-fr | 48.5-49.6 | **53.3-56.0** |
+| structured | 84.0 | **92.9** (+11 %) |
+| prose | 40.3 | 41.8 (+4 %, noisy) |
+| code-fr | 51.1 | **56.3** (+10 %) |
+| code-en | 57.1 | **60.9** (+7 %) |
+| code sparkDash | 76.1 | **84.3** (+11 %) |
 | prefill 8K / 32K / 100K | — | 1 341 / 1 416 / 1 424 |
 
 Activate with `EXL3_OVERLAY_HOST=<generated overlay> GLM53_COOP_GEOMETRY=1`; `supervise.sh` forwards both

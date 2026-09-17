@@ -86,10 +86,13 @@ the overlay. `EXL3_OVERLAY_HOST` empty = the baked plugin (default).
 
 | probe (tok/s) | stock control | + coop geometry 1 |
 |---|---:|---:|
-| structured (count 1-200) | 83.1-84.4 | **88.7-92.9** (+9 %) |
-| prose (hash-map, en) | 37.0-37.2 | **39.3-42.5** (+9 %) |
-| code (fr, BST) | 48.5-49.6 | **53.3-56.0** (+12 %) |
+| structured (count 1-200) | 84.0 | **92.9** (+11 %) |
+| prose (hash-map, en) | 40.3 | 41.8 (+4 %, noisy) |
+| code (fr, BST) | 51.1 | **56.3** (+10 %) |
+| code (en, BST) | 57.1 | **60.9** (+7 %) |
+| code (sparkDash, clamped) | 76.1 | **84.3** (+11 %) |
 | prefill 8K / 32K / 100K | — | 1 341 / 1 416 / 1 424 |
 
 The stock control was a separate boot in the same session (adaptive-k on, E3 on, `MM_IMAGES=16`);
-coop was reproduced over three boots.
+coop was reproduced over three boots. The gain is smaller on English code than French because the
+DFlash2 drafter accepts English better, so decode is less expert-bound there — still positive.
