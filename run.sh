@@ -27,6 +27,10 @@ GMU="${GMU:-0.87}"
 PMU="${PMU-64}"                 # --prefix-match-unit (empty = off)
 RETENTION="${RETENTION-4608}"   # --prefix-cache-retention-interval (empty = upstream default 0)
 ADAPTIVE_K="${ADAPTIVE_K:-0}"   # 1 = adaptive verification length (opt-in, 2026-09-12); 0 = byte-for-byte the baked scheduler
+# Optional: mount a generated exl3.py over the baked one (e.g. the cooperative-MoE overlay from
+# extensions/cooperative_moe/prepare_profile.py). Empty = the baked plugin. Its runtime.py + .so
+# live in /root/.cache/vllm/cooperative_moe, i.e. inside the JIT cache mount (needs JIT_CACHE=1).
+EXL3_OVERLAY_HOST="${EXL3_OVERLAY_HOST:-}"
 HERE=$(dirname "$(readlink -f "$0")")
 EXTRA_MOUNTS=()
 MODEL=/root/.cache/huggingface/hub/${MODEL_SNAP}
@@ -61,6 +65,7 @@ ENVS=(-e NCCL_SOCKET_IFNAME="$NCCL_IF" -e GLOO_SOCKET_IFNAME="$NCCL_IF"
   # (py-spy: gather_initial_states / l2norm_fwd launch on both ranks). =0 is not viable on this build (no
   # piecewise graphs without torch.compile): keep 1 and boot through supervise.sh (auto-retry + warmup).
   -e VLLM_USE_BREAKABLE_CUDAGRAPH="${BREAKABLE:-1}"
+  -e GLM53_COOP_GEOMETRY="${GLM53_COOP_GEOMETRY:-}"   # cooperative-MoE tile geometry (0/1/2); only read by the coop overlay
   -e TORCH_CUDA_ARCH_LIST=12.1a)
 [ -n "${NCCL_IB_GID_INDEX:-}" ] && ENVS+=(-e NCCL_IB_GID_INDEX="$NCCL_IB_GID_INDEX")
 
@@ -94,6 +99,8 @@ ARGS=(serve "$MODEL"
 # still lands on a FULL CUDA graph captured for each candidate length + 1. Measured here: +19 % prose,
 # +31 % prose @131K, +7 % code long, -4 % short FR code; prefill cost zero. Regenerate the two
 # overlay files with overlay/adaptive_k/patch_adaptive_k_nightly.py whenever the scheduler moves.
+[ -n "$EXL3_OVERLAY_HOST" ] && EXTRA_MOUNTS+=(-v "$EXL3_OVERLAY_HOST:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/quantization/exl3.py:ro")
+
 _ak_sizes() {
   # Uniform decode of r requests at draft length kk is r*(kk+1) tokens; capture the union of those
   # with the list vLLM would build on its own so max_cudagraph_capture_size and mixed coverage stay.
