@@ -69,10 +69,27 @@ GLM53_COOP_GEOMETRY=1 ADAPTIVE_K=1 ./supervise.sh    # or ./run.sh head|worker b
 `supervise.sh` forwards `EXL3_OVERLAY_HOST` and `GLM53_COOP_GEOMETRY`, so a supervised restart keeps
 the overlay. `EXL3_OVERLAY_HOST` empty = the baked plugin (default).
 
-## Validation status
+## Validation status — PASSED (2026-09-17)
 
 - Host-side: `test_dispatch.py` (57 checks), `test_profile.py` (8), `python3 -O test_optimized_init.py`
   (`native_init_calls=['cdll','abi','info']` — the optimized-`assert` bug is fixed in this revision).
-- Pre-flight import in the recipe image: `_glm53_coop_installed=True`, geometry 1 (A-wide/B-wide).
-- **Pending: the packaged GPU gate** (`test_cuda_integration.py`, needs an idle GPU) and a live boot
-  with the diagnostic that `eligible` layers > 0 and cooperative is selected at decode rows.
+- **GPU gate `test_cuda_integration.py`: `status: pass`, 48 checks on both ranks** (same `max_rel_l2`
+  0.00267 ≪ 0.05 tolerance; the two retained peak samples are 0.0033/0.0036, below the 0.01 gross
+  screen and not peak-required). Graph-vs-eager and row-40→E3 fallback both pass.
+- Live TP2 boot (both boots): `native prepared` `occupancy_a/b/rot=2/2/3`,
+  `prepared-layer summary: eligible=42 ineligible=0`, and decode rows 1-4 log
+  `selected=True reason=cooperative` in both eager and capture.
+- Quality: `code_eval` **8/8**, multi-turn tool calling **pass** (no tag leak), DFlash2 acceptance
+  unchanged (87.7 % on structured count, 50-65 % on the harder probes). Prefill unchanged (E3).
+
+### Measured (this stack, official protocol — TTFT excluded, median of 3, same-session stock control)
+
+| probe (tok/s) | stock control | + coop geometry 1 |
+|---|---:|---:|
+| structured (count 1-200) | 83.1-84.4 | **88.7-92.9** (+9 %) |
+| prose (hash-map, en) | 37.0-37.2 | **39.3-42.5** (+9 %) |
+| code (fr, BST) | 48.5-49.6 | **53.3-56.0** (+12 %) |
+| prefill 8K / 32K / 100K | — | 1 341 / 1 416 / 1 424 |
+
+The stock control was a separate boot in the same session (adaptive-k on, E3 on, `MM_IMAGES=16`);
+coop was reproduced over three boots.
