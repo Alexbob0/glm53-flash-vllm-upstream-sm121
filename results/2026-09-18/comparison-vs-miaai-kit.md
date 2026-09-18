@@ -81,6 +81,7 @@ today's +9 %). The remaining 32K gap is the only prefill cell where the kit lead
 | KV pool (log line `GPU KV cache size`) | **2 140 221 tokens @ 1M** (2.14× a 1M request) | 883 552 @ 850K (1.04×); published ~1.05 M @ 900K |
 | c4, repeated 12K prompts, aggregate (2026-09-12) | **41.0** tok/s | 21.0 |
 | c4, distinct 12K prompts, 256 tokens (2026-09-18) | 22.6 tok/s aggregate, TTFT 10.9–32.4 s (prefills serialize, `MIXED_PREFILL=skip`) | — |
+| structured probe, 2 / 4 concurrent streams, aggregate (their protocol, 2026-09-18) | **126–132** / **193** tok/s (per stream 61–66 / 48–49) | *published* 124.5 at ×2 (coop) |
 | 100K repeated prompt (prefix cache) | TTFT 3.4–3.6 s | — |
 | code_eval (8 small functions, greedy) | 8 / 8 | 8 / 8 |
 | Tool calling (`glm47` parser, multi-turn) | pass | pass |

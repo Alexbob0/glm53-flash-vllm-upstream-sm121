@@ -17,12 +17,14 @@ overlay** (small patch scripts) plus one extension build — **no vLLM C++ is re
 | decode, code @ 32K / 131K context | **47.4 / 47.9** | 35.9 / 31.5 (stock flags) | — |
 | cold prefill 8K / 32K / 100K | **1 472** / 1 556 / **1 564** | 1 441 / **1 605** / 1 434 | ~1 580–1 640 @ 8K/32K (repeated text) |
 | KV pool | **2 140 221 tok @ 1M** (2.14×) | 883 552 @ 850K (1.04×) | ~1.05 M @ 900K |
-| c4, repeated 12K prompts, aggregate | **41.0** tok/s | 21.0 | 124.5 structured ×2 (their bench) |
+| c4, repeated 12K prompts, aggregate (our bench) | **41.0** tok/s | 21.0 | — |
+| structured probe, 2 / 4 concurrent streams, aggregate (their protocol) | **126–132** / **193** tok/s | — | 124.5 / — (coop, ×2) |
 | code_eval 8 functions / tool calling | 8/8 · pass | 8/8 · pass | — |
 | teacher-forced KL vs kit stock (1 792 pos.) | top-1 91.0 %, median 0.0095 nats | — (floor between two of its own boots: 93.5 %, 0.0053) | — |
 
 Decode is **+21–28 %** over the kit measured on the same machines and **+6–16 %** over its best published
-numbers; cold prefill is at parity (−3 % at 32K, +2 % at 8K, +9 % at 100K); the KV pool is 2.4×. The KL cost of
+numbers; cold prefill is at parity (−3 % at 32K, +2 % at 8K, +9 % at 100K); the KV pool is 2.4×. At 2 concurrent structured
+streams the aggregates are close (126–132 vs their published 124.5): our concurrency scaling is weaker (×1.4 vs ×1.6 from c1 to c2). The KL cost of
 our dense-EXL3 pack against their BF16 dense layers is ~0.004 nats median, with identical code_eval and tool calling.
 Full tables, protocol and their published sources: [`results/2026-09-18/comparison-vs-miaai-kit.md`](results/2026-09-18/comparison-vs-miaai-kit.md).
 

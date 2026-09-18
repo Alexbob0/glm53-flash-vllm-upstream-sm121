@@ -218,6 +218,9 @@ Ported onto this fork tree (`exl3-fat-kernel/patch_exl3_decode_pipeline_ours.py`
 | **b4, coop + FAST=1 (adopted)** | 91.1 | 39.5 | 53.4 | 60.0 | **1 472 / 1 556 / 1 564** | 95.9 % / 0.0027 |
 | b4, FAST=1, coop off | 89.9 | 40.6 | 51.7 | 61.3 | 1 468 / 1 557 / 1 557 | 96.1 % / 0.0021 |
 
+Concurrency on MiaAI's structured probe (production config, 2026-09-18 evening): c1 92.1, **c2 126–132 aggregate**
+(61–66 per stream), **c4 193** (48–49 per stream) — their published c2 aggregate is 124.5 (coop). Scaling c1→c2 is ×1.4 here vs ×1.6 there.
+
 The fast path alone equals the cooperative MoE alone (−1 %); together, decode is unchanged (coop already serves decode rows
 1–32) and the fast kernel only speeds up the thin tier of prefill. Kept on for that +1–2 %.
 
