@@ -16,7 +16,7 @@ ENVS="SPEC=${SPEC:-dflash} K=${K:-7} SEQS=${SEQS:-6} MAX_LEN=${MAX_LEN:-1000000}
 # Forward adaptive-k tuning knobs only when the caller set them (runtime retune without a reboot).
 for _v in GLM53_ADAPTIVE_K GLM53_ADAPTIVE_K_SET GLM53_ADAPTIVE_K_ALPHA GLM53_ADAPTIVE_K_MARGIN \
           GLM53_ADAPTIVE_K_MIN_STEPS GLM53_ADAPTIVE_K_SATURATE GLM53_ADAPTIVE_K_HIST GLM53_ADAPTIVE_K_FILE \
-          GLM53_COOP_GEOMETRY EXL3_OVERLAY_HOST; do
+          GLM53_COOP_GEOMETRY EXL3_OVERLAY_HOST FUSED_MERGE DENSE_NOCAT MOE_FAST NCCL_PROTO NCCL_NCHANNELS; do
   eval "_val=\${$_v-}"
   [ -n "$_val" ] && ENVS="$ENVS $_v=$_val"
 done

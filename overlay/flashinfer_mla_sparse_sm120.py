@@ -27,6 +27,93 @@ if TYPE_CHECKING:
 _SPLIT_MAIN_TOPK = 2048
 _SPLIT_DECODE_CHUNK = 64
 
+# Fused main+extra LSE merge in ONE Triton kernel (2026-09-18). A torch profile of a 4608-token
+# prefill chunk showed ~260 ms of eager glue per chunk in this wrapper —
+# (o1.float()*w1 + o2.float()*w2)/(w1+w2) -> .to(bf16) -> masked_fill_: seven fp32 ops over
+# [4608, 32, 512] tensors (302 MB), ~3.3 GB of memory traffic per layer x 11 layers, i.e. 1.6x
+# the attention kernel itself. The kernel below reads o1/o2 in bf16 + l1/l2 fp32 + both masks
+# and writes the masked bf16 output directly (~0.45 GB/layer): cold prefill +6-7 %.
+# Opt-out: GLM53_FUSED_LSE_MERGE=0 (env, at boot) or the file
+# /root/.cache/vllm/glm53_fused_merge.off (hot toggle, checked per call: same-boot A/B).
+# Same formula, same log2 base; expected deviation <= 1 bf16 ulp (Triton fp32 division);
+# tests/test_fused_lse_merge.py.
+import logging
+import os
+
+_merge_logger = logging.getLogger(__name__)
+_FUSED_MERGE_ENV = os.environ.get("GLM53_FUSED_LSE_MERGE", "1") == "1"
+_FUSED_MERGE_OFF_FILE = "/root/.cache/vllm/glm53_fused_merge.off"
+_fused_merge_logged: set[str] = set()
+try:
+    import triton
+    import triton.language as tl
+
+    _HAS_TRITON = True
+except Exception:  # pragma: no cover - triton is part of the image
+    _HAS_TRITON = False
+
+
+if _HAS_TRITON:
+
+    @triton.jit
+    def _lse_merge_kernel(
+        o1_ptr, o2_ptr, l1_ptr, l2_ptr, extra_empty_ptr, empty_rows_ptr, out_ptr,
+        H: tl.constexpr, D: tl.constexpr, BLOCK_D: tl.constexpr,
+    ):
+        # one program per (token, head) row of D elements
+        pid = tl.program_id(0)
+        n = pid // H
+        l1 = tl.load(l1_ptr + pid)
+        l2 = tl.load(l2_ptr + pid)
+        ee = tl.load(extra_empty_ptr + n)
+        er = tl.load(empty_rows_ptr + n)
+        l2 = tl.where(ee != 0, float("-inf"), l2)
+        m = tl.maximum(l1, l2)
+        w1 = tl.exp2(l1 - m)
+        w2 = tl.exp2(l2 - m)
+        s = w1 + w2
+        base = pid.to(tl.int64) * D
+        offs = tl.arange(0, BLOCK_D)
+        for d0 in range(0, D, BLOCK_D):
+            mask = (d0 + offs) < D
+            a = tl.load(o1_ptr + base + d0 + offs, mask=mask, other=0.0).to(tl.float32)
+            b = tl.load(o2_ptr + base + d0 + offs, mask=mask, other=0.0).to(tl.float32)
+            y = (a * w1 + b * w2) / s
+            y = tl.where(er != 0, 0.0, y)
+            tl.store(out_ptr + base + d0 + offs, y.to(out_ptr.dtype.element_ty), mask=mask)
+
+
+def _use_fused_merge() -> bool:
+    return _HAS_TRITON and _FUSED_MERGE_ENV and not os.path.exists(_FUSED_MERGE_OFF_FILE)
+
+
+def _fused_lse_merge(
+    o1: torch.Tensor, l1: torch.Tensor, o2: torch.Tensor, l2: torch.Tensor,
+    extra_empty: torch.Tensor, empty_rows: torch.Tensor,
+) -> torch.Tensor:
+    assert o1.is_contiguous() and o2.is_contiguous() and l1.is_contiguous() and l2.is_contiguous()
+    n_tok, n_heads, d = o1.shape
+    out = torch.empty_like(o1)
+    if n_tok == 0:
+        return out
+    _lse_merge_kernel[(n_tok * n_heads,)](
+        o1, o2, l1, l2,
+        extra_empty.contiguous().view(torch.uint8),
+        empty_rows.contiguous().view(torch.uint8),
+        out, H=n_heads, D=d, BLOCK_D=triton.next_power_of_2(d), num_warps=4,
+    )
+    return out
+
+
+def _eager_lse_merge(o1, l1, o2, l2, extra_empty, empty_rows, out_dtype):
+    l2 = l2.masked_fill(extra_empty.unsqueeze(1), float("-inf"))
+    m = torch.maximum(l1, l2)
+    w1 = torch.exp2(l1 - m).unsqueeze(-1)
+    w2 = torch.exp2(l2 - m).unsqueeze(-1)
+    out = ((o1.float() * w1 + o2.float() * w2) / (w1 + w2)).to(out_dtype)
+    out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
+    return out
+
 
 def _kv_scale_format_for_model(model_type: str | None) -> str:
     if model_type is not None and model_type.startswith("glm"):
@@ -199,13 +286,14 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
                 q[s:e], kv4, extra_idx[s:e], extra_len[s:e], extra_k, o2[s:e], l2[s:e]
             )
 
-        l2 = l2.masked_fill(extra_empty.unsqueeze(1), float("-inf"))
-        m = torch.maximum(l1, l2)
-        w1 = torch.exp2(l1 - m).unsqueeze(-1)
-        w2 = torch.exp2(l2 - m).unsqueeze(-1)
-        out = ((o1.float() * w1 + o2.float() * w2) / (w1 + w2)).to(q.dtype)
-        out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
-        return out, None
+        fused = _use_fused_merge()
+        tag = "fused-triton" if fused else "eager"
+        if tag not in _fused_merge_logged:
+            _fused_merge_logged.add(tag)
+            _merge_logger.info("[glm53-lse-merge] main+extra merge path: %s", tag)
+        if fused:
+            return _fused_lse_merge(o1, l1, o2, l2, extra_empty, empty_rows), None
+        return _eager_lse_merge(o1, l1, o2, l2, extra_empty, empty_rows, q.dtype), None
 
     def _sparse_call(
         self,

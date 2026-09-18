@@ -1350,9 +1350,35 @@ def apply_exl3_grouped_fat(
     _EXL3_FAT_DIAG["grouped_calls"] += 1
 
 
+def exl3_moe_fast_requested() -> bool:
+    """[18/09] Opt-in SM121 K4/N256 thin-decode dispatch (port of MiaAI 2fb0dc0, default off).
+
+    Mirrors the native dispatcher's validation: anything other than 0/1
+    raises at load instead of surfacing as a native TORCH_CHECK on the
+    first decode call.
+    """
+    raw = os.environ.get("GLM53_EXL3_MOE_FAST", "0")
+    if raw not in ("0", "1"):
+        raise RuntimeError("GLM53_EXL3_MOE_FAST must be 0 or 1")
+    return raw == "1"
+
+
 def build_exl3_fused_state(layer: torch.nn.Module, inners: list[dict[str, Any]]) -> None:
     """Pointer tables + fused temps, once after load. No per-token alloc."""
     import exllamav3_ext
+
+    # Fail closed: an explicitly requested fast thin-decode path must never
+    # silently run the stock kernel on an image built without it.
+    fast = exl3_moe_fast_requested()
+    if fast:
+        if not hasattr(exllamav3_ext, "glm53_fast_moe_version"):
+            raise RuntimeError(
+                "GLM53_EXL3_MOE_FAST=1 requires the native decode-pipeline "
+                "image (exllamav3_ext.glm53_fast_moe_version); this image "
+                "was built without exl3-fat-kernel/patch_exl3_decode_pipeline_ours.py"
+            )
+        if exllamav3_ext.glm53_fast_moe_version() != 1:
+            raise RuntimeError("Unsupported native EXL3 decode-pipeline version")
 
     device = layer.w13_trellis.device
     n_exp = len(inners)
@@ -1377,6 +1403,13 @@ def build_exl3_fused_state(layer: torch.nn.Module, inners: list[dict[str, Any]])
         "down_suh": _ptrs("down", "suh"),
         "down_svh": _ptrs("down", "svh"),
     }
+    # [18/09] Gate/up SUH equality was verified across every expert at load time
+    # (layer._exl3_shared_w13_suh, torch.equal on the packed tensors). Aliasing the
+    # pointer tables lets the native fast path prove the transform-reuse predicate by
+    # pointer identity (gate_ptrs_suh.data_ptr() == up_ptrs_suh.data_ptr()) and skip
+    # the redundant up-input Hadamard. FAST=0 leaves the tables exactly as stock.
+    if fast and bool(getattr(layer, "_exl3_shared_w13_suh", False)):
+        layer._exl3_ptrs["up_suh"] = layer._exl3_ptrs["gate_suh"]
     idx = int(device.index) if device.index is not None else 0
     concurrency = int(exllamav3_ext.exl3_moe_max_concurrency(idx))
     if concurrency < 1:
@@ -2106,6 +2139,13 @@ class Exl3MoEMethod(FusedMoEMethodBase):
             except Exception as exc:
                 fused_err = repr(exc)
                 layer._exl3_ptrs = None
+        if exl3_moe_fast_requested() and not fused_ok:
+            # [18/09] Fail closed: FAST=1 never degrades to the stock kernel or the Python loop.
+            raise RuntimeError(
+                "GLM53_EXL3_MOE_FAST=1 requires the fused exl3_moe path on an "
+                "image built with exl3-fat-kernel/patch_exl3_decode_pipeline_ours.py; "
+                f"load-time setup failed: {fused_err or 'EXL3_FUSED_MOE=0'}"
+            )
         if not self._logged:
             if fused_ok:
                 logger.info(
@@ -2156,6 +2196,60 @@ class Exl3MoEMethod(FusedMoEMethodBase):
 _DENSE_EXL3_LAYERS: list = []
 
 
+# [18/09] DENSE_NOCAT : au prefill (rows >= 1024, chemin reconstruct fuse d'exllamav3), chaque shard
+# est ecrit directement dans une sortie preallouee (vue colonne) au lieu de torch.cat des sorties
+# (profil 18/09 : 41 ms de cat par chunk de 4608). Reproduit la branche `use_fused` de
+# LinearEXL3.reconstruct_hgemm (reconstruct_had_slice + hgemm, pas de had_r_128 sur y) ; tout autre
+# cas (rows < 1024, dims non multiples de 128, no_fused_reconstruct) retombe sur le chemin historique.
+# Opt-out : GLM53_DENSE_NOCAT=0 (env) ou /root/.cache/vllm/glm53_dense_nocat.off (relu tous les 64 appels).
+_DENSE_NOCAT_ENV = os.environ.get("GLM53_DENSE_NOCAT", "1") == "1"
+_DENSE_NOCAT_OFF_FILE = "/root/.cache/vllm/glm53_dense_nocat.off"
+_dense_nocat_state = {"calls": 0, "on": _DENSE_NOCAT_ENV, "logged": None}
+
+
+def _dense_nocat_enabled() -> bool:
+    st = _dense_nocat_state
+    st["calls"] += 1
+    if st["calls"] % 64 == 1:
+        st["on"] = _DENSE_NOCAT_ENV and not os.path.exists(_DENSE_NOCAT_OFF_FILE)
+    return st["on"]
+
+
+def _reconstruct_hgemm_into(linear, x_fp16: torch.Tensor, y_: torch.Tensor) -> bool:
+    """LinearEXL3.reconstruct_hgemm fused branch, writing into y_ (a [rows, out] column view)."""
+    mod = sys.modules.get("exllamav3.modules.quant.exl3")
+    if mod is None:
+        return False
+    rows = x_fp16.shape[0]
+    if linear._fused_reconstruct is None:
+        linear._fused_reconstruct = (
+            linear.in_features % 128 == 0
+            and linear.out_features % 128 == 0
+            and not mod.no_fused_reconstruct
+        )
+    if not (linear._fused_reconstruct and rows >= 1024):
+        return False
+    ext = mod.ext
+    max_n = mod.MAX_RECONSTRUCT_SLICE_N
+    dev = linear.trellis.device
+    if linear.out_features <= max_n:
+        w = torch.empty((linear.in_features, linear.out_features), dtype=torch.half, device=dev)
+        ext.reconstruct_had_slice(w, linear.trellis, linear.suh, linear.svh, linear.K, linear.mcg, linear.mul1, 0)
+        ext.hgemm(x_fp16, w, y_)
+    else:
+        w_ = torch.empty((linear.in_features * max_n,), dtype=torch.half, device=dev)
+        for n_start in range(0, linear.out_features, max_n):
+            n_end = min(n_start + max_n, linear.out_features)
+            w = w_[: linear.in_features * (n_end - n_start)].view(linear.in_features, n_end - n_start)
+            ext.reconstruct_had_slice(
+                w, linear.trellis, linear.suh, linear.svh[n_start:], linear.K, linear.mcg, linear.mul1, n_start
+            )
+            ext.hgemm(x_fp16, w, y_[:, n_start:n_end])
+    if linear.bias is not None:
+        y_ += linear.bias
+    return True
+
+
 def _dense_exl3_forward_impl(x: torch.Tensor, handle: int) -> torch.Tensor:
     entry = _DENSE_EXL3_LAYERS[handle]
     linears = entry["linears"]
@@ -2165,6 +2259,28 @@ def _dense_exl3_forward_impl(x: torch.Tensor, handle: int) -> torch.Tensor:
     x_fp16 = x.to(torch.float16).contiguous()
     if len(linears) == 1 and not bf16_shards:
         return linears[0].forward(x_fp16, {}, out_dtype=torch.float16)
+    if x_fp16.dim() == 2 and x_fp16.shape[0] >= 1024 and _dense_nocat_enabled():
+        rows = x_fp16.shape[0]
+        y = torch.empty((rows, sum(output_sizes)), dtype=torch.float16, device=x.device)
+        col = 0
+        ok = True
+        for i, linear in enumerate(linears):
+            n = output_sizes[i]
+            y_ = y[:, col : col + n]
+            if i in bf16_shards:
+                bf16_idx = bf16_shards.index(i)
+                out_start = sum(output_sizes[j] for j in bf16_shards[:bf16_idx])
+                w_shard = bf16_weight[out_start : out_start + output_sizes[i]]
+                y_.copy_(F.linear(x, w_shard))
+            elif n != linear.out_features or not _reconstruct_hgemm_into(linear, x_fp16, y_):
+                ok = False
+                break
+            col += n
+        if ok:
+            if _dense_nocat_state["logged"] is not True:
+                _dense_nocat_state["logged"] = True
+                logger.info("[dense-overlay] no-cat preallocated output path active (rows=%d)", rows)
+            return y
     outputs = []
     for i, linear in enumerate(linears):
         if i in bf16_shards:

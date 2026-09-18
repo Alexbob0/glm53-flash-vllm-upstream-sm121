@@ -1,5 +1,12 @@
 # Results
 
+> **2026-09-18 update** — a torch profile of one 4608-token prefill chunk found the hidden cost: ~260 ms of eager glue in our
+> SM120 attention wrapper (the fp32 LSE merge of the 2048+128 top-k split), 8 % of the chunk. Replaced by one Triton kernel
+> (+6–7 % cold prefill) plus a pre-allocated output in the dense EXL3 forward (+2 %): **1 446 / 1 537 / 1 548 → with MiaAI's
+> thin-decode fast path also ported (image b4) 1 472 / 1 556 / 1 564 tok/s at 8K / 32K / 100K**, decode unchanged
+> (91.1 / 39.5 / 53.4 / 60.0), KL within the same-boot noise floor. MiaAI's thin-decode fast path and the cooperative MoE
+> turn out to be the same gain, not two. Section at the end; full comparison in `results/2026-09-18/comparison-vs-miaai-kit.md`.
+>
 > **2026-09-12 update** — adaptive verification length (opt-in, default-on in `supervise.sh`): +19 % prose,
 > +31 % prose @131K, +7 % long code, zero prefill cost. Head-to-head vs the MiaAI fork kit: 82.3 / 38.2 / 48.9
 > vs 73.5 / 32.6 / 41.7 tok/s, KV pool 2.14M vs 0.88M tokens @1M, c4 aggregate 41.0 vs 21.0. Section at the end.
@@ -164,3 +171,58 @@ policy unit tests (the launcher's capture-size union is tested too, so it cannot
 > The template bug fixed the same day (Reasoning Effort emitted even with thinking off) is *not* a perf
 > knob: with it, `code_eval` fell to 6/8 and code came out 3–10× too long. The shipped
 > `chat_template.jinja` gates the Reasoning Effort line on `thinking_enabled`.
+
+
+## 2026-09-18 — prefill profile, two overlay fixes (+8–9 %), MiaAI's thin-decode fast path (= coop, not additive)
+
+Stack: image b3 → b4 (+ thin-decode kernels), cooperative MoE geometry 1, adaptive-k, 1M, GMU 0.87, `MAX_NUM_SEQS=6`, MNBT 7168.
+
+### Profile of one 4608-token prefill chunk (torch profiler, one iteration, `PROFILE_DIR` recipe, both ranks within 1 %)
+
+`kernel_union == kernel_sum` (3 253 vs 3 254 ms): nothing overlaps, NCCL included. By outermost op (head rank):
+
+| Op | ms | % | of which |
+|---|---:|---:|---|
+| `moe_forward_shared` (E3 + thin + shared) | 1 177 | 36 | fat gate-up 385, fat down 297, thin `exl3_moe` 246, staging copies ~125 |
+| `unified_mla_attention_with_output` (11 layers) | 531 | 16 | prefill kernel 164, **eager LSE merge + pad glue ~260**, tail 2048+128 47 |
+| `dense_exl3_forward` | 471 | 14.5 | fp16 cuBLAS GEMM 318, reconstruct 35, `torch.cat` 41, `x.to(fp16)` 41 |
+| KDA (FLA Triton, 34 layers) | 337 | 10 | |
+| mHC tilelang | 294 | 9 | |
+| NCCL all-reduce | 216 | 6.6 | 102 × `AllReduce_Sum_bf16_RING_LL`, 37.7 MB each |
+| casts / contiguous outside ops | 108 | 3 | |
+
+The merge was seven fp32 ops over `[4608, 32, 512]` tensors: ~3.3 GB of traffic per layer, 1.6× the attention kernel.
+Raw: `results/2026-09-18/profile-4608-chunk-*.txt`; tools: `bench/trace/`.
+
+### Same-boot A/B of the fixes (hot toggles, `prefill_quick`, best of 2 after a warm-up pass)
+
+| Config | 8K | 32K | 100K |
+|---|---:|---:|---:|
+| both off (= `NCCL_PROTO=Simple` only) | 1 336 | 1 414 | 1 423 |
+| pre-allocated dense output only | 1 367 | 1 440 | 1 450 |
+| **fused Triton LSE merge + pre-allocated output** | **1 446** | **1 537** | **1 548** |
+| repeat | 1 453 | 1 531 | 1 538 |
+
+`NCCL_PROTO=Simple`: neutral. Decode 90.9 / 41.4 / 53.8 / 60.2 / 82.9 (unchanged). code_eval 8/8, tool calling pass.
+Teacher-forced KL, both fixes vs both off, same boot: top-1 95.2 %, median 0.0019 nats — **below** the same-config repeat on that
+boot (94.3 %, 0.0028). Kernel unit test: ≤ 1 bf16 ulp (82 rounding flips / 23.4 M values), 19.7 → 2.0 ms per merge at prefill shape.
+
+### MiaAI's SM121 thin-decode fast path (`GLM53_EXL3_MOE_FAST`, image b4)
+
+Ported onto this fork tree (`exl3-fat-kernel/patch_exl3_decode_pipeline_ours.py`); their parity battery
+(`test_exl3_thin_fast_gpu.py --smoke` + `compare_thin_fast.py`) passes on our build. Serving A/B, same day:
+
+| Config | structured | prose | code fr | code en | 8K / 32K / 100K prefill | KL vs b3 coop |
+|---|---:|---:|---:|---:|---|---|
+| b3, cooperative MoE (reference) | 90.9 | 41.4 | 53.8 | 60.2 | 1 446 / 1 537 / 1 548 | — |
+| **b4, coop + FAST=1 (adopted)** | 91.1 | 39.5 | 53.4 | 60.0 | **1 472 / 1 556 / 1 564** | 95.9 % / 0.0027 |
+| b4, FAST=1, coop off | 89.9 | 40.6 | 51.7 | 61.3 | 1 468 / 1 557 / 1 557 | 96.1 % / 0.0021 |
+
+The fast path alone equals the cooperative MoE alone (−1 %); together, decode is unchanged (coop already serves decode rows
+1–32) and the fast kernel only speeds up the thin tier of prefill. Kept on for that +1–2 %.
+
+### Negative results of the day (all measured, none adopted)
+
+max_model_len 500K vs 1M: ±2 % (the persistent top-k kernel is decode-only) · `no_reconstruct` on dense layers: −35 % ·
+cache of reconstructed fp16 dense weights: ±1 % for −33 % KV pool · cuBLAS instead of exllamav3 `hgemm`: ±1 % ·
+`NCCL_PROTO=Simple`: neutral.

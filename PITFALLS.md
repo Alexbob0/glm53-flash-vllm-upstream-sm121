@@ -75,3 +75,18 @@ Things that cost us a boot (8–10 minutes each on this hardware), in the order 
   reading, not a wedged GPU (a 4096² matmul completes in 0.5 s).
 - **Streaming chunks ≠ tokens.** With DFlash2 each SSE chunk carries ~3 tokens; count
   `usage.completion_tokens`, not chunks, or every decode number is 3× too low.
+- **Greedy decoding is not reproducible run-to-run on this stack** (atomicAdd scatter in the fat-expert path): two identical
+  `temperature=0` requests diverge after a dozen lines. "Identical output" is not a regression test here; use a teacher-forced
+  logprob panel and read it against a same-boot or inter-boot noise floor (same config repeated: top-1 ~94–96 %, KL median
+  ~0.002–0.003; different boots: ~93.5 %, ~0.005).
+- **The first measurement after boot under-reads by 5–15 %** (JIT / autotune), even after `warmup.sh`. Run a discarded pass at
+  every prompt size before the pass you keep.
+- **An env knob is only real if the launcher forwards it.** `GLM53_PERSISTENT_TOPK_MAX_LEN` is read inside the container by
+  `patch_kpool_topk_fallback.py`; until 2026-09-18 neither `run.sh` nor `supervise.sh` passed it through, so a 500K test booted
+  three times "with the fallback forced" while running the persistent kernel, and failed each time. Check `docker inspect` env.
+- **`kernel_union == kernel_sum` in a profile means nothing overlaps.** On this build every kernel, NCCL included, is serialized:
+  each ms of Python glue or communication is wall time. That is how 260 ms of eager fp32 merge per 4608-token chunk hid for
+  two weeks behind "structural" explanations (KDA, dense GEMM, context regime) that all measured neutral.
+- **A hot toggle beats a reboot for A/B on this hardware**: boot-to-boot variance is ±5 %, most of the effects worth chasing are
+  smaller. Both 2026-09-18 fixes read an `.off` file in the JIT cache so both arms run on one boot.
+

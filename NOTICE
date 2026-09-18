@@ -12,6 +12,9 @@ This repository bundles or adapts work from:
     overlay/exl3.py                       now based on their 2026-09-07 main (AGPL) merged with this repo's
                                           nightly deltas, gemm2 path and multi-stream fallback
     overlay/rightsize/patch_indexer_workspace.py   their indexer right-sizing patch, nightly anchor
+    exl3-fat-kernel/patch_exl3_decode_pipeline_ours.py   port of their overlay/patch_exl3_decode_pipeline.py (kit ca85576,
+                                          AGPL-3.0-or-later; SM121 thin-decode kernels) onto the 1.4.2 fork tree
+    overlay/exl3.py                       also carries their GLM53_EXL3_MOE_FAST load-time gate (2026-09-18)
     The EAGLE3 aux-hidden-state block, the drafter KV group logic and the fused context-KV
     reconstruction for an EXL3 draft are ports/adaptations of their fork of vLLM.
 - MiaAI Lab — exllamav3 fork (MIT), built from source by the Dockerfile.

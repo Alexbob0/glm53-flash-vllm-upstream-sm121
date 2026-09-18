@@ -108,6 +108,32 @@ Two operational notes from the same day:
   session, ~8 GiB) pushes free memory to ~104 GiB: use `GMU=0.85` or free the host. `supervise.sh`
   drops caches and waits for `MEM_FREE_MIN` (115 GiB) before launching, with an explicit message.
 
+## Prefill: the profile that found the missing 9 % (2026-09-18)
+
+Every configuration lever had been tried and measured neutral (context regime, dense reconstruction, weight cache, cuBLAS,
+MNBT), so we profiled one 4608-token prefill chunk instead (`PROFILE_DIR` in `run.sh`, `bench/measure.py --profile`,
+`bench/trace/` for the analysis). Two facts came out: **nothing overlaps** (`kernel_union == kernel_sum`, NCCL included), and
+**the SM120 attention wrapper spent 1.6× its attention kernel in eager PyTorch** — the fp32 LSE merge of our 2048+128 top-k
+split, seven ops over `[4608, 32, 512]` tensors, ~3.3 GB of traffic per layer × 11 layers = 8 % of the chunk. KDA was 10 %,
+mHC 9 %, NCCL 6.6 % (RING_LL on 37.7 MB messages), the dense EXL3 GEMMs 10 %.
+
+| Fix (same boot, hot toggles) | 8K | 32K | 100K |
+|---|---:|---:|---:|
+| before | 1 336 | 1 414 | 1 423 |
+| + pre-allocated output in the dense EXL3 forward (no `torch.cat`) | 1 367 | 1 440 | 1 450 |
+| + **fused Triton LSE merge** (`_lse_merge_kernel`, ≤ 1 bf16 ulp, 19.7 → 2.0 ms per merge) | **1 446** | **1 537** | **1 548** |
+| + MiaAI's thin-decode fast path (image b4, thin tier of prefill) | **1 472** | **1 556** | **1 564** |
+
+Decode unchanged (91.1 / 39.5 / 53.4 / 60.0 tok/s structured / prose / code-fr / code-en), code_eval 8/8, tool calling pass,
+teacher-forced KL below the same-boot noise floor. Knobs: `FUSED_MERGE=0`, `DENSE_NOCAT=0`, `MOE_FAST=1` (needs the image
+built with `exl3-fat-kernel/patch_exl3_decode_pipeline_ours.py`); hot toggles = `glm53_fused_merge.off` /
+`glm53_dense_nocat.off` in the JIT cache `vllm/` directory on both nodes. `NCCL_PROTO=Simple` measured neutral.
+
+MiaAI's **thin-decode fast path** (`GLM53_EXL3_MOE_FAST`, kit `ca85576`) is ported here onto their 1.4.2 fork tree; alone it
+gives the same decode as the cooperative MoE (89.9 vs 90.9 structured), and with coop on it changes nothing on decode — the
+two are one gain, not two. The full comparison against their kit (measured on this hardware and as published) is in
+[`results/2026-09-18/comparison-vs-miaai-kit.md`](results/2026-09-18/comparison-vs-miaai-kit.md).
+
 ## Adaptive-k (opt-in since 2026-09-12, default-on in `supervise.sh`)
 
 DFlash2 drafts 8 tokens (1 anchor + k=7) regardless of how well the draft is accepted. On prose the
@@ -195,7 +221,8 @@ turboderp/GLM-5.3-Flash-exl3, see the companion repo
 incoai/GLM-5.3-Flash-DFlash2 (BF16, works as-is) or an EXL3 quant of it (faster; cannot be
 redistributed, CC BY-NC-ND). Knobs: `SPEC=none` (no draft), `MAX_LEN`, `GMU`, `K`,
 `ADAPTIVE_K=1` (adaptive verification length; on by default under `supervise.sh`),
-`EXTRA_ALIAS=<name>` (extra served-model alias), `EXL3_FAT_KERNEL=0` (legacy MoE tier).
+`EXTRA_ALIAS=<name>` (extra served-model alias), `EXL3_FAT_KERNEL=0` (legacy MoE tier), `FUSED_MERGE=0` /
+`DENSE_NOCAT=0` (2026-09-18 prefill fixes off), `MOE_FAST=1` (MiaAI thin-decode kernels, opt-in).
 
 Never pass `--language-model-only`: it selects `Glm5NextForCausalLM`, whose module prefixes
 (`model.layers.*`) no longer match the pack's `language_model.model.layers.*` keys.
@@ -210,10 +237,13 @@ overlay/adaptive_k/     opt-in adaptive verification length (scheduler + cudagra
 overlay/rightsize/      sparse-indexer workspace right-sizing (nightly anchor)
 overlay/e3/             MiaAI's E3 grouped fat-expert MoE (.cu/.cuh + their build script, unmodified, AGPL)
 exl3-fat-kernel/        E2 fat-expert GEMM (.cu/.cuh) + graft script (MiaAI Lab) + gemm2 / atomic scatter
+                        + patch_exl3_decode_pipeline_ours.py (MiaAI's SM121 thin-decode kernels, ported to this fork tree)
 extensions/cooperative_moe/  opt-in cooperative decode MoE (native .so + adapter + generator + tests)
 run.sh / warmup.sh / supervise.sh / chain.sh   two-node launcher, warmup sweep, hang-tolerant boot, post-boot bench chain
 bench/                  decode protocol, prefill probes, measure.py (auditable streaming bench), apc_turns.py
-tests/                  numerical validation of the top-k split/merge, kernel shape probes
+bench/trace/            torch-profiler trace analysis (per kernel, per family, per outermost op, kernel -> aten op attribution)
+tests/                  numerical validation of the top-k split/merge, fused LSE merge (<= 1 ulp), strided hgemm output
+results/                dated measurement dumps, incl. the 2026-09-18 comparison against the MiaAI kit
 RESULTS.md              measurements; PITFALLS.md: what bit us
 ```
 

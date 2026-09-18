@@ -16,7 +16,9 @@ ARG EXLLAMAV3_COMMIT=63b32f001d7b2cfed3b3e3aaf25f534ba53cc7ed
 ENV TORCH_CUDA_ARCH_LIST=12.1a
 ARG MAX_JOBS=3
 
-# --- ExLlamaV3 extension (+ E2 fat-expert kernel graft) ---------------------------------
+# --- ExLlamaV3 extension (+ E2 fat-expert kernel graft + SM121 thin-decode fast path) ----------
+# patch_exl3_decode_pipeline_ours.py = MiaAI's opt-in K4/N256 thin-decode kernels (kit ca85576) ported onto
+# this fork tree (3-parameter kernel template). Additive; GLM53_EXL3_MOE_FAST=0 (default) runs the stock kernels.
 COPY exl3-fat-kernel /opt/exl3-fat-kernel
 RUN set -eux; \
     mkdir -p /opt/exllamav3-src; \
@@ -24,10 +26,11 @@ RUN set -eux; \
       | tar -xz -C /opt/exllamav3-src --strip-components=1; \
     python3 /opt/exl3-fat-kernel/patch_exl3_fat_kernel.py \
       /opt/exllamav3-src/exllamav3/exllamav3_ext /opt/exl3-fat-kernel; \
+    python3 /opt/exl3-fat-kernel/patch_exl3_decode_pipeline_ours.py /opt/exllamav3-src/exllamav3/exllamav3_ext; \
     CPATH=$(python3 -c "import glob;print(':'.join(glob.glob('/usr/local/lib/python3.12/dist-packages/nvidia/*/include')))") \
       MAX_JOBS=${MAX_JOBS} pip install --no-build-isolation --no-deps /opt/exllamav3-src; \
     pip install -q marisa-trie; \
-    python3 -c "import torch, exllamav3_ext as e; assert hasattr(e, 'exl3_fat_gemm') and hasattr(e, 'exl3_fat_gemm_scatter') and hasattr(e, 'exl3_fat_gemm2') and e.exl3_fat_scatter_atomic(), dir(e); print('exllamav3_ext OK (fat_gemm=yes gemm2=yes atomic=yes)')"
+    python3 -c "import torch, exllamav3_ext as e; assert hasattr(e, 'exl3_fat_gemm') and hasattr(e, 'exl3_fat_gemm_scatter') and hasattr(e, 'exl3_fat_gemm2') and e.exl3_fat_scatter_atomic(), dir(e); assert hasattr(e, 'glm53_fast_moe_version') and e.glm53_fast_moe_version() == 1, dir(e); print('exllamav3_ext OK (fat_gemm=yes gemm2=yes atomic=yes thin_fast=yes)')"
 
 # --- E3 grouped fat-expert MoE (MiaAI Lab, AGPL-3.0-or-later, 2026-09-07) as an additive module ------
 # Built by their own script (WITHOUT --use_fast_math) inside a copy of the installed extension tree;

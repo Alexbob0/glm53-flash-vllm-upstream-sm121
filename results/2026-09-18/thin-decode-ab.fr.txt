@@ -1,0 +1,14 @@
+Thin-decode fast path SM121 (MiaAI ca85576 / 2fb0dc0) porté sur notre fork exllamav3 (image b4 = b3 + kernels K4/N256 additifs,
+GLM53_EXL3_MOE_FAST, stock intact). Parité kit (test_exl3_thin_fast_gpu --smoke + compare_thin_fast) : ALL CASES PASS (RMSE rel ~1e-8).
+A/B serving (b4, 1M, GMU 0.87, adaptive-k, merge Triton + no-cat), protocole officiel décode (TTFT exclu, médiane de 3), prefill_quick.
+
+config                       struct  prose  code-fr code-en clamp | prefill 8K/32K/100K | c4 12K agg | KL vs b3 top1/méd | pool KV
+b3 coop (réf. 18/09 17h)      90.9   41.4   53.8    60.2    82.9  | 1446 / 1537 / 1548  |     —      |        —          | 2 129 151
+Y  b4 coop ON  + FAST=1       91.1   39.5   53.4    60.0    83.4  | 1472 / 1556 / 1564  |   22.6     | 0.959 / 0.0027    | 1 822 878 (!)
+X  b4 coop OFF + FAST=1       89.9   40.6   51.7    61.3    83.0  | 1468 / 1557 / 1557  |   22.1     | 0.961 / 0.0021    | 2 158 671
+
+Lecture : FAST seul (X) ≈ coop seul (b3) à −1 % → leur gain décode (+8-15 % vs stock) est RÉEL mais ÉQUIVALENT au nôtre, pas additif :
+coop prend toutes les lignes 1-32 du décode. Avec coop ON (Y) le fast ne sert que le tier thin du prefill : +1-2 % prefill, décode inchangé.
+Qualité : code_eval 8/8, tool pass, KL sous le plancher inter-boot (93,5 %) pour X et Y.
+Décision (règles) : Y adopté — b4 + coop + FAST=1 → serve-coop.sh (IMG b4, MOE_FAST 1, overlay coop dans cache/b4). Perte : aucune ;
+gain : +1-2 % prefill. Pool KV 1,82 M sur le boot Y = variance inter-boot : le boot de prod (même config) donne 2 140 221.

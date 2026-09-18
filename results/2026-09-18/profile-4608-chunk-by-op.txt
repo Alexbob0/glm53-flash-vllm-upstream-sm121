@@ -1,0 +1,122 @@
+
+== head  total 3254 ms
+  1177.4 ms  36.2%   3696x  vllm::moe_forward_shared
+              748.5 ms  vllm::moe_forward_shared | 
+              246.4 ms  vllm::moe_forward_shared | void exl3_moe_kernel<4, 256, 1>
+               52.3 ms  aten::copy_ | void at::native::unrolled_elementwise_kernel<at::n
+               34.7 ms  vllm::dense_exl3_forward | nvjet_sm121_hsh_mma_128x192x64_2_32x96x64_tmaAB_bz
+               21.3 ms  aten::copy_ | void at::native::vectorized_elementwise_kernel<4, 
+               21.3 ms  vllm::dense_exl3_forward | void cutlass::Kernel2<cutlass_80_tensorop_f16_s168
+               15.5 ms  aten::fill_ | void at::native::vectorized_elementwise_kernel<4, 
+               10.2 ms  aten::mm | nvjet_sm121_tss_mma_128x160x64_2_64x40x64_tmaAB_bz
+   531.2 ms  16.3%   2013x  vllm::unified_mla_attention_with_output
+              163.6 ms  vllm::unified_mla_attention_with_output | void sparse_mla_prefill_mg_kernel<
+               62.4 ms  aten::mul | void at::native::elementwise_kernel<128, 2, at::na
+               47.4 ms  vllm::unified_mla_attention_with_output | void flashinfer::sparse_mla_sm120::sparse_mla_deco
+               47.3 ms  aten::copy_ | void at::native::unrolled_elementwise_kernel<at::n
+               45.5 ms  aten::add | void at::native::vectorized_elementwise_kernel<4, 
+               41.4 ms  aten::bmm | void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf1
+               30.7 ms  aten::div | void at::native::elementwise_kernel<128, 2, at::na
+               22.6 ms  aten::copy_ | void at::native::vectorized_elementwise_kernel<4, 
+   470.7 ms  14.5%    742x  vllm::dense_exl3_forward
+              294.2 ms  vllm::dense_exl3_forward | void cutlass::Kernel2<cutlass_80_tensorop_f16_s168
+               41.0 ms  aten::cat | void at::native::
+               40.9 ms  aten::copy_ | void at::native::unrolled_elementwise_kernel<at::n
+               35.4 ms  vllm::dense_exl3_forward | void reconstruct_had_kernel<6, 2>
+               23.6 ms  vllm::dense_exl3_forward | nvjet_sm121_hsh_mma_128x208x64_2_32x104x64_tmaAB_b
+               12.8 ms  aten::mm | nvjet_sm121_tst_mma_128x96x64_3_64x24x64_tmaAB_bz_
+                8.0 ms  vllm::dense_exl3_forward | nvjet_sm121_hsh_mma_256x112x64_2_64x56x64_tmaAB_bz
+                6.6 ms  aten::mm | void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf1
+   337.3 ms  10.4%    905x  KDA/other (no op)
+               50.2 ms  - | recompute_w_u_fwd_kernel
+               48.6 ms  - | chunk_gla_fwd_kernel_o
+               47.7 ms  - | chunk_gated_delta_rule_fwd_kernel_h_blockdim64
+               40.2 ms  - | _causal_conv1d_fwd_kernel
+               30.3 ms  - | chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inte
+               27.3 ms  - | chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_intr
+               22.9 ms  - | l2norm_fwd_kernel2
+               20.5 ms  - | kda_gate_cumsum_fwd_kernel
+   294.2 ms   9.0%    267x  vllm::mhc_fused_post_pre_tilelang
+              140.2 ms  vllm::mhc_fused_post_pre_tilelang | mhc_post_tilelang_kernel
+               89.2 ms  vllm::mhc_fused_post_pre_tilelang | mhc_pre_big_fuse_with_norm_tilelang_kernel
+               64.8 ms  vllm::mhc_fused_post_pre_tilelang | void deep_gemm::sm120_tf32_hc_prenorm_gemm_impl<24
+   215.8 ms   6.6%     91x  vllm::all_reduce
+              215.8 ms  vllm::all_reduce | ncclDevKernel_AllReduce_Sum_bf16_RING_LL
+    70.1 ms   2.2%    148x  aten::to
+               70.1 ms  aten::copy_ | void at::native::unrolled_elementwise_kernel<at::n
+    38.1 ms   1.2%    104x  aten::contiguous
+               38.1 ms  aten::copy_ | void at::native::elementwise_kernel<128, 4, at::na
+    30.9 ms   0.9%    102x  aten::linear
+               25.9 ms  aten::mm | void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16
+                2.5 ms  aten::mm | nvjet_sm121_tst_mma_160x128x64_2_80x32x64_tmaAB_bz
+                2.4 ms  aten::mm | nvjet_sm121_tst_mma_128x96x64_3_64x24x64_tmaAB_bz_
+    21.6 ms   0.7%     71x  aten::add
+               21.6 ms  aten::add | void at::native::vectorized_elementwise_kernel<4, 
+                0.0 ms  aten::add | void at::native::elementwise_kernel<128, 2, at::na
+                0.0 ms  aten::add | void at::native::vectorized_elementwise_kernel<2, 
+    18.3 ms   0.6%     53x  aten::mm
+               10.4 ms  aten::mm | nvjet_sm121_tss_mma_128x160x64_2_64x40x64_tmaAB_bz
+                7.9 ms  aten::mm | void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_
+    13.8 ms   0.4%     69x  aten::zeros
+               13.8 ms  aten::fill_ | void at::native::vectorized_elementwise_kernel<4, 
+
+== worker  total 3251 ms
+  1166.0 ms  35.9%   3696x  vllm::moe_forward_shared
+              739.9 ms  vllm::moe_forward_shared | 
+              244.5 ms  vllm::moe_forward_shared | void exl3_moe_kernel<4, 256, 1>
+               52.4 ms  aten::copy_ | void at::native::unrolled_elementwise_kernel<at::n
+               34.6 ms  vllm::dense_exl3_forward | nvjet_sm121_hsh_mma_128x192x64_2_32x96x64_tmaAB_bz
+               21.4 ms  aten::copy_ | void at::native::vectorized_elementwise_kernel<4, 
+               20.2 ms  vllm::dense_exl3_forward | void cutlass::Kernel2<cutlass_80_tensorop_f16_s168
+               15.8 ms  aten::fill_ | void at::native::vectorized_elementwise_kernel<4, 
+               10.0 ms  aten::mm | nvjet_sm121_tss_mma_128x160x64_2_64x40x64_tmaAB_bz
+   538.8 ms  16.6%   2013x  vllm::unified_mla_attention_with_output
+              166.0 ms  vllm::unified_mla_attention_with_output | void sparse_mla_prefill_mg_kernel<
+               62.6 ms  aten::mul | void at::native::elementwise_kernel<128, 2, at::na
+               48.0 ms  aten::copy_ | void at::native::unrolled_elementwise_kernel<at::n
+               47.4 ms  vllm::unified_mla_attention_with_output | void flashinfer::sparse_mla_sm120::sparse_mla_deco
+               46.0 ms  aten::add | void at::native::vectorized_elementwise_kernel<4, 
+               42.3 ms  aten::bmm | void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf1
+               31.0 ms  aten::div | void at::native::elementwise_kernel<128, 2, at::na
+               22.7 ms  aten::copy_ | void at::native::vectorized_elementwise_kernel<4, 
+   485.5 ms  14.9%    742x  vllm::dense_exl3_forward
+              304.2 ms  vllm::dense_exl3_forward | void cutlass::Kernel2<cutlass_80_tensorop_f16_s168
+               41.9 ms  aten::copy_ | void at::native::unrolled_elementwise_kernel<at::n
+               41.8 ms  aten::cat | void at::native::
+               37.2 ms  vllm::dense_exl3_forward | void reconstruct_had_kernel<6, 2>
+               24.9 ms  vllm::dense_exl3_forward | nvjet_sm121_hsh_mma_128x208x64_2_32x104x64_tmaAB_b
+               12.7 ms  aten::mm | nvjet_sm121_tst_mma_128x96x64_3_64x24x64_tmaAB_bz_
+                8.2 ms  vllm::dense_exl3_forward | nvjet_sm121_hsh_mma_256x112x64_2_64x56x64_tmaAB_bz
+                6.6 ms  aten::mm | void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf1
+   350.7 ms  10.8%    905x  KDA/other (no op)
+               54.7 ms  - | recompute_w_u_fwd_kernel
+               51.6 ms  - | chunk_gla_fwd_kernel_o
+               47.9 ms  - | chunk_gated_delta_rule_fwd_kernel_h_blockdim64
+               40.8 ms  - | _causal_conv1d_fwd_kernel
+               32.5 ms  - | chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inte
+               27.9 ms  - | chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_intr
+               23.5 ms  - | l2norm_fwd_kernel2
+               23.0 ms  - | kda_gate_cumsum_fwd_kernel
+   295.8 ms   9.1%    267x  vllm::mhc_fused_post_pre_tilelang
+              140.7 ms  vllm::mhc_fused_post_pre_tilelang | mhc_post_tilelang_kernel
+               89.6 ms  vllm::mhc_fused_post_pre_tilelang | mhc_pre_big_fuse_with_norm_tilelang_kernel
+               65.4 ms  vllm::mhc_fused_post_pre_tilelang | void deep_gemm::sm120_tf32_hc_prenorm_gemm_impl<24
+   182.2 ms   5.6%     91x  vllm::all_reduce
+              182.2 ms  vllm::all_reduce | ncclDevKernel_AllReduce_Sum_bf16_RING_LL
+    73.3 ms   2.3%    148x  aten::to
+               73.3 ms  aten::copy_ | void at::native::unrolled_elementwise_kernel<at::n
+    39.3 ms   1.2%    104x  aten::contiguous
+               39.3 ms  aten::copy_ | void at::native::elementwise_kernel<128, 4, at::na
+    31.1 ms   1.0%    102x  aten::linear
+               26.1 ms  aten::mm | void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16
+                2.5 ms  aten::mm | nvjet_sm121_tst_mma_160x128x64_2_80x32x64_tmaAB_bz
+                2.5 ms  aten::mm | nvjet_sm121_tst_mma_128x96x64_3_64x24x64_tmaAB_bz_
+    21.7 ms   0.7%     71x  aten::add
+               21.6 ms  aten::add | void at::native::vectorized_elementwise_kernel<4, 
+                0.1 ms  aten::add | void at::native::elementwise_kernel<128, 2, at::na
+                0.0 ms  aten::add | void at::native::vectorized_elementwise_kernel<2, 
+    18.9 ms   0.6%     53x  aten::mm
+               10.9 ms  aten::mm | nvjet_sm121_tss_mma_128x160x64_2_64x40x64_tmaAB_bz
+                8.0 ms  aten::mm | void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_
+    14.0 ms   0.4%     69x  aten::zeros
+               14.0 ms  aten::fill_ | void at::native::vectorized_elementwise_kernel<4, 

@@ -1,0 +1,101 @@
+
+== measurements/2026-09-18-profile/head/dp0_pp0_tp0_dcp0_ep0_rank0.1789739401981385069.pt.trace.json.gz.summary.json
+   kernel_sum 3254 ms | union 3253 ms | span 3290 ms | calls 8632
+   other                   693 ms   21.3 %  calls 165
+   elementwise_copy        689 ms   21.2 %  calls 4803
+   dense_gemm              556 ms   17.1 %  calls 1008
+   kda_fla                 316 ms    9.7 %  calls 411
+   mhc_tilelang            306 ms    9.4 %  calls 275
+   experts_moe             246 ms    7.6 %  calls 42
+   mla_indexer             222 ms    6.8 %  calls 1693
+   nccl                    218 ms    6.7 %  calls 105
+   norm_act                  8 ms    0.3 %  calls 130
+   -- top 45 kernels:
+      385.1 ms     42x  [other] 
+      315.5 ms    198x  [dense_gemm] void cutlass::Kernel2<cutlass_80_tensorop_f16_s16816gemm_relu_f16_128x256_32x3_nn_align8>
+      296.7 ms     42x  [other] 
+      246.4 ms     42x  [experts_moe] void exl3_moe_kernel<4, 256, 1>
+      217.6 ms    102x  [nccl] ncclDevKernel_AllReduce_Sum_bf16_RING_LL
+      163.6 ms     11x  [mla_indexer] void sparse_mla_prefill_mg_kernel<
+      149.9 ms     95x  [mhc_tilelang] mhc_post_tilelang_kernel
+       90.2 ms     90x  [mhc_tilelang] mhc_pre_big_fuse_with_norm_tilelang_kernel
+       83.8 ms    214x  [elementwise_copy] void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda
+       72.6 ms    358x  [elementwise_copy] void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda
+       66.6 ms     42x  [elementwise_copy] 
+       65.5 ms     90x  [mhc_tilelang] void deep_gemm::sm120_tf32_hc_prenorm_gemm_impl<24u, 16384u, 128u, 32u, 64u, 1u, 4u, 256u, 128u>
+       62.4 ms     22x  [elementwise_copy] void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float
+       53.7 ms    116x  [elementwise_copy] void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_
+       52.6 ms     34x  [elementwise_copy] void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda
+       50.2 ms     34x  [kda_fla] recompute_w_u_fwd_kernel
+       49.8 ms    101x  [elementwise_copy] void at::native::
+       48.6 ms     34x  [kda_fla] chunk_gla_fwd_kernel_o
+       47.7 ms     34x  [kda_fla] chunk_gated_delta_rule_fwd_kernel_h_blockdim64
+       45.6 ms     44x  [elementwise_copy] void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<float>, std::array<char*, 3ul> >
+       43.8 ms     53x  [elementwise_copy] void at::native::vectorized_elementwise_kernel<4, at::native::bfloat16_copy_kernel_cuda
+       41.9 ms    306x  [dense_gemm] void reconstruct_had_kernel<6, 2>
+       40.2 ms     34x  [kda_fla] _causal_conv1d_fwd_kernel
+       38.5 ms    792x  [mla_indexer] void flashinfer::sparse_mla_sm120::sparse_mla_decode_dsv3_2_kernel<
+       37.5 ms     95x  [dense_gemm] nvjet_sm121_hsh_mma_128x192x64_2_32x96x64_tmaAB_bz_NNNN
+       30.7 ms     11x  [elementwise_copy] void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float
+       30.3 ms     34x  [kda_fla] chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_inter
+       29.3 ms    110x  [elementwise_copy] void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<float>, std::array<char*, 1ul> >
+       27.3 ms     34x  [kda_fla] chunk_kda_scaled_dot_kkt_fwd_kernel_intra_sub_intra
+       25.9 ms     80x  [dense_gemm] void cutlass::Kernel2<cutlass_80_tensorop_bf16_s16816gemm_relu_bf16_128x256_32x3_tn_align8>
+       24.2 ms     45x  [dense_gemm] void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_tn_align8>
+       23.8 ms     11x  [dense_gemm] void cutlass::Kernel2<cutlass_80_wmma_tensorop_bf16_s161616gemm_bf16_32x32_128x1_nn_align8>
+       23.6 ms     12x  [dense_gemm] nvjet_sm121_hsh_mma_128x208x64_2_32x104x64_tmaAB_bz_NNNN
+       22.9 ms     68x  [kda_fla] l2norm_fwd_kernel2
+       21.6 ms     62x  [elementwise_copy] void at::native::vectorized_elementwise_kernel<4, at::native::CUDAFunctor_add<c10::BFloat16>, std::array<char*
+       20.7 ms     84x  [dense_gemm] nvjet_sm121_tss_mma_128x160x64_2_64x40x64_tmaAB_bz_TNNN
+       20.5 ms     34x  [kda_fla] kda_gate_cumsum_fwd_kernel
+       18.1 ms     11x  [elementwise_copy] void at::native::
+       17.2 ms     34x  [kda_fla] layer_norm_gated_fwd_kernel
+       16.7 ms     11x  [elementwise_copy] void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::
+       15.2 ms     79x  [dense_gemm] nvjet_sm121_tst_mma_128x96x64_3_64x24x64_tmaAB_bz_TNNN
+       11.9 ms     76x  [elementwise_copy] void at::native::vectorized_elementwise_kernel<4, at::native::FillFunctor<c10::BFloat16>, std::array<char*, 1u
+       10.9 ms     34x  [kda_fla] merge_16x16_to_64x64_inverse_kernel
+        8.9 ms    792x  [mla_indexer] void flashinfer::sparse_mla_sm120::sparse_mla_decode_dsv4_merge_kernel<32, 512, 64, 8>
+        8.0 ms     11x  [dense_gemm] nvjet_sm121_hsh_mma_256x112x64_2_64x56x64_tmaAB_bz_NNNN
+   -- 'other' (top 15):
+      385.1 ms     42x  (anonymous namespace)::fm_gateup_kernel(__half const*, unsigned short const* const*, unsigned short const* const*, __hal
+      296.7 ms     42x  (anonymous namespace)::fm_down_kernel(__half const*, unsigned short const* const*, __half const* const*, float*, long co
+        3.9 ms      1x  _zero_kv_blocks_kernel
+        3.9 ms     13x  Kernel
+        2.5 ms     42x  void vllm::moe::single_group_topk::detail::single_group_topk_warp_kernel<float, float, int, (vllm::moe::ScoringFunc)1, 3
+        0.7 ms     10x  void vllm::reshape_and_cache_flash_kernel<__nv_bfloat16, __nv_bfloat16, (vllm::Fp8KVCacheDataType)0>(__nv_bfloat16 const
+        0.2 ms      2x  void vllm::vocab_embedding::vocab_parallel_embedding_kernel<int, uint4>(uint4*, int const*, uint4 const*, long, long, lo
+        0.0 ms      4x  _apply_write_kernel
+        0.0 ms      1x  _prepare_dflash_inputs_kernel
+        0.0 ms      1x  _compute_slot_mappings_kernel
+        0.0 ms      1x  _gather_block_tables_kernel
+        0.0 ms      1x  _gumbel_sample_kernel
+        0.0 ms      1x  _post_update_kernel
+        0.0 ms      1x  _selector_walk_kernel
+        0.0 ms      1x  _prepare_pos_seq_lens_kernel
+
+== measurements/2026-09-18-profile/worker/dp0_pp0_tp1_dcp0_ep1_rank1.1789739401971798980.pt.trace.json.gz.summary.json
+   kernel_sum 3251 ms | union 3251 ms | span 3296 ms | calls 8632
+   elementwise_copy        699 ms   21.5 %  calls 4803
+   other                   685 ms   21.1 %  calls 165
+   dense_gemm              569 ms   17.5 %  calls 1008
+   kda_fla                 331 ms   10.2 %  calls 411
+   mhc_tilelang            307 ms    9.4 %  calls 275
+   experts_moe             244 ms    7.5 %  calls 42
+   mla_indexer             225 ms    6.9 %  calls 1693
+   nccl                    183 ms    5.6 %  calls 105
+   norm_act                  8 ms    0.3 %  calls 130
+   -- top 45 kernels:
+      379.6 ms     42x  [other] 
+      324.3 ms    198x  [dense_gemm] void cutlass::Kernel2<cutlass_80_tensorop_f16_s16816gemm_relu_f16_128x256_32x3_nn_align8>
+      294.3 ms     42x  [other] 
+      244.5 ms     42x  [experts_moe] void exl3_moe_kernel<4, 256, 1>
+      182.8 ms    102x  [nccl] ncclDevKernel_AllReduce_Sum_bf16_RING_LL
+      166.0 ms     11x  [mla_indexer] void sparse_mla_prefill_mg_kernel<
+      150.4 ms     95x  [mhc_tilelang] mhc_post_tilelang_kernel
+       90.6 ms     90x  [mhc_tilelang] mhc_pre_big_fuse_with_norm_tilelang_kernel
+       87.2 ms    214x  [elementwise_copy] void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda
+       73.4 ms    358x  [elementwise_copy] void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda
+       66.2 ms     90x  [mhc_tilelang] void deep_gemm::sm120_tf32_hc_prenorm_gemm_impl<24u, 16384u, 128u, 32u, 64u, 1u, 4u, 256u, 128u>
+       66.1 ms     42x  [elementwise_copy] 
+       62.6 ms     22x  [elementwise_copy] void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float
+       55.5 ms    116x  [elementwise_copy] void at::native::elementwise_kernel<128, 4, at::native::gpu_kernel_impl_nocast<at::native::direct_copy_kernel_

@@ -66,8 +66,20 @@ ENVS=(-e NCCL_SOCKET_IFNAME="$NCCL_IF" -e GLOO_SOCKET_IFNAME="$NCCL_IF"
   # piecewise graphs without torch.compile): keep 1 and boot through supervise.sh (auto-retry + warmup).
   -e VLLM_USE_BREAKABLE_CUDAGRAPH="${BREAKABLE:-1}"
   -e GLM53_COOP_GEOMETRY="${GLM53_COOP_GEOMETRY:-}"   # cooperative-MoE tile geometry (0/1/2); only read by the coop overlay
+  # Fused Triton LSE merge of the 2048+128 top-k split (2026-09-18): cold prefill +6-7 %. FUSED_MERGE=0 = the eager
+  # merge; hot toggle = touch <JIT cache>/vllm/glm53_fused_merge.off on both nodes (see the SM120 backend).
+  -e GLM53_FUSED_LSE_MERGE="${FUSED_MERGE:-1}"
+  # Dense EXL3 forward writes each shard into a pre-allocated output instead of torch.cat (2026-09-18): prefill +2 %.
+  -e GLM53_DENSE_NOCAT="${DENSE_NOCAT:-1}"
+  # MiaAI's SM121 thin-decode fast path (opt-in; needs the image built with patch_exl3_decode_pipeline_ours.py, fails
+  # closed otherwise). Measured here: alone = the cooperative MoE gain (not additive); with coop on it only serves the
+  # thin tier of prefill (+1-2 %). 0 = stock kernels, byte for byte.
+  -e GLM53_EXL3_MOE_FAST="${MOE_FAST:-0}"
   -e TORCH_CUDA_ARCH_LIST=12.1a)
 [ -n "${NCCL_IB_GID_INDEX:-}" ] && ENVS+=(-e NCCL_IB_GID_INDEX="$NCCL_IB_GID_INDEX")
+# Opt-in NCCL knobs (NCCL_PROTO=Simple measured neutral on prefill here; NCHANNELS not measured).
+[ -n "${NCCL_PROTO:-}" ] && ENVS+=(-e NCCL_PROTO="$NCCL_PROTO")
+[ -n "${NCCL_NCHANNELS:-}" ] && ENVS+=(-e NCCL_MIN_NCHANNELS="$NCCL_NCHANNELS" -e NCCL_MAX_NCHANNELS="$NCCL_NCHANNELS")
 
 ARGS=(serve "$MODEL"
   --served-model-name GLM-5.3-Flash-EXL3 ${EXTRA_ALIAS:-}

@@ -1,0 +1,22 @@
+Leviers prefill du 18/09 — A/B sur UN boot (b3 + coop geo1 + adaptive-k, 1M, GMU 0.87, NCCL_PROTO=Simple au boot),
+prefill_quick.py (prompt/TTFT, meilleure de 2, prompts salés), chauffe jetée. Baseline prod du jour : 1 341-1 350 / 1 407-1 424 / 1 412-1 430.
+
+config                                   8K     32K    100K
+C  merge off + nocat off (= NCCL Simple) 1336   1414   1423   -> NCCL_PROTO=Simple : NEUTRE (laissé opt-in)
+B  merge off, nocat ON                   1367   1440   1450   -> no-cat : +2 %
+A  merge ON + nocat ON                   1446   1537   1548   -> merge Triton : +6-7 % ; total +8/+9/+9 % vs baseline
+A2 répétition                            1453   1531   1538
+kit MiaAI (12/09, réf.)                  1441   1605   1434
+
+Décode A (protocole officiel, TTFT exclu, médiane de 3) : structuré 90,9 / prose 41,4 / code fr 53,8 / code en 60,2 / clamp 82,9
+ (= coop geo1 du 17/09 : 88,7-92,9 / 39,3-42,5 / 53,3-56,0 -> inchangé). Pool KV 2 129 151.
+Qualité : code_eval 8/8, tool_probe pass. Panel KL (teacher forcing, 1 792 positions, même boot) :
+ A1 vs A2 (même config)  top-1 94,31 %  KL méd 0,00276  -> plancher de bruit (pile non déterministe : E3 scatter atomicAdd)
+ A1 vs C  (tout off)     top-1 95,20 %  KL méd 0,00188  -> sous le plancher : patches invisibles
+ C  vs M  (merge seul)   top-1 94,48 %  KL méd 0,00199
+ A1 vs M  (nocat seul)   top-1 95,31 %  KL méd 0,00180
+Greedy « égalité » : inutilisable sur cette pile (deux runs identiques divergent après ~12 lignes), cf. g_all_on_2 vs g_all_on_3.
+Tests unitaires GPU : tests/test_fused_lse_merge.py (≤ 1 ulp bf16, 82 flips / 23,4 M ; 19,7 -> 2,0 ms par merge à [4608,32,512]),
+ tests/test_hgemm_strided_out.py (hgemm dans une vue colonne == contigu, bit-exact).
+Adopté en défaut (run.sh) : MLA_OVERLAY=1 + FUSED_MERGE=1, DENSE_NOCAT=1. NCCL_PROTO vide (auto). Opt-out à chaud : fichiers
+ /home/aibox/glm53-upstream-cache/b3/vllm/glm53_{fused_merge,dense_nocat}.off sur les DEUX nœuds.
