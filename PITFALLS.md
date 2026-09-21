@@ -89,4 +89,12 @@ Things that cost us a boot (8–10 minutes each on this hardware), in the order 
   two weeks behind "structural" explanations (KDA, dense GEMM, context regime) that all measured neutral.
 - **A hot toggle beats a reboot for A/B on this hardware**: boot-to-boot variance is ±5 %, most of the effects worth chasing are
   smaller. Both 2026-09-18 fixes read an `.off` file in the JIT cache so both arms run on one boot.
-
+- **Never `copy_()` to the GPU straight from a file-backed mmap tensor on GB10.** Under a CUDA
+  context that path runs at ~0.1 GB/s (63 s for 5.2 GiB) on the 4 KiB DGX OS kernel; `clone()` (or
+  `pin_memory()`) into anonymous memory first and it is disk-bound again. This alone was the
+  274 s vs 101 s head/worker asymmetry of `Loading weights took` — the two ranks just differ in how
+  many tensors are still contiguous after the TP narrow. The standalone benchmark that "proved" the
+  mmap path was fast had no CUDA context.
+- **`$( [ -n "$V" ] && echo … )` inside a bash array kills a `set -e` script when `V` is empty** (the
+  assignment takes the substitution's exit status). Write `[ -z "$V" ] || echo …`. Cost one silent
+  non-boot: both containers absent, empty logs, supervisor polling `/health` until its timeout.

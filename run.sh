@@ -141,6 +141,16 @@ if [ "$ADAPTIVE_K" = 1 ]; then
   read -r -a AK_SIZES <<< "$(_ak_sizes "${SEQS:-6}" "$K" "$AK_SET")"
   ARGS+=(--cudagraph-capture-sizes "${AK_SIZES[@]}")
 fi
+# [2026-09-21] Weight loading (overlay/loadclone/weight_utils.py, byte-identical weights, only the copy path changes).
+# LOAD_CLONE=1 (default): clone each tensor into anonymous memory before the host->device copy. Root cause: an H2D copy whose
+# source is a file-backed mmap tensor runs at ~0.1 GB/s under a CUDA context on GB10 (63 s for 5.2 GiB; 2.6 s once cloned).
+# LOAD_PREFETCH=<n> (default 6): n shards read ahead into the page cache by n threads while the main thread consumes.
+# Measured "Loading weights took" (169 GiB, head/worker): stock 274/101 s -> clone 104/104 -> prefetch 3: 73/72
+# -> prefetch 6: 50/52 (10: 48/51 = plateau). NVMe read_ahead_kb had no effect. LOAD_CLONE=0 = stock iterator.
+if [ "${LOAD_CLONE:-1}" = 1 ]; then
+  EXTRA_MOUNTS+=(-v "$HERE/overlay/loadclone/weight_utils.py:$V/model_executor/model_loader/weight_utils.py:ro"
+                 -e GLM53_LOAD_CLONE=1 -e GLM53_LOAD_PREFETCH="${LOAD_PREFETCH:-6}")
+fi
 # NEVER add --language-model-only: it switches to Glm5NextForCausalLM and the module prefixes
 # no longer match the EXL3 non_routed keys (language_model.model.layers.*).
 # EAGLE_DROP=0 (default): keep the last matching block for the eagle-style drafter instead of dropping it.

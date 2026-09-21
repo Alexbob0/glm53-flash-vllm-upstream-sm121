@@ -82,9 +82,53 @@ the failure it fixes.
 | 14 | `run.sh` (`EXL3_FAT_STREAMS`) | same latency bound, E2 fallback tier | fat experts round-robined over 4 CUDA streams (one scratch set each, atomic scatter): +14–19 % on E2; superseded by E3 |
 | 15 | `overlay/adaptive_k/` | the verifier always checks all k=7 drafts, even when the drafter's acceptance is low (prose) | opt-in **adaptive verification length** (MiaAI port): per-step prefix from a CPU-side EMA of accepted drafts, uniform over the batch so every step still hits a full CUDA graph — **+19 % prose, +31 % prose @131K, +7 % long code**, zero prefill cost |
 | 16 | `extensions/cooperative_moe/` | stock fused EXL3 `exl3_moe` re-reads expert weights per token, launch-bound at decode | opt-in **cooperative decode MoE** (MiaAI port, geometry 1 A-wide/B-wide): decode-sized fused path 1-32 rows, shared scratch, prefill/E3 unchanged — **+9 % structured, +9 % prose, +12 % code-fr**; GPU gate passed on both ranks |
+| 17 | `overlay/loadclone/weight_utils.py` | **weight loading at 0.6 GB/s on the head rank (274 s for 169 GiB)**: a host→device copy whose source is a file-backed mmap tensor runs at **~0.1 GB/s under a CUDA context on GB10** (4 KiB-page kernel, not only the 64 KiB "wedge") | `clone()` each tensor into anonymous memory in `safetensors_weights_iterator` + a **threaded shard prefetcher** (`GLM53_LOAD_PREFETCH=6`): **274/101 s → 50/52 s** (head/worker), full boot 8.5 → ~4.5 min, bytes identical |
 
 Also required: exllamav3 ≥ 1.4 instantiates `NullConfig` inside `LinearEXL3` — the plugin imports
 the real `exllamav3.model.config` under its namespace stub instead of a hand-made stub.
+
+## Weight loading: 274 s → 48 s on the head rank (2026-09-21)
+
+The two ranks load the same 169 GiB from identical NVMe drives, yet `Loading weights took` read
+**274 s on the head and 101 s on the worker** for weeks. Everything usually blamed was measured and
+cleared: swap (`vm.swappiness=1` → 272 s), fragmentation (16–43 extents per shard), big.LITTLE
+placement (95–99 % of samples on the 3.9 GHz X925 cores on both nodes), memory pressure (free/cache
+identical), vLLM's multithread loader (273 s — safetensors 0.8 `load_file` is zero-copy mmap too).
+py-spy (`docker exec --privileged`, wheel pip-installed into the live container) showed the same
+profile on both ranks — 75 % in `_narrow_tp` / `dest.copy_` — just 2.7× slower on the head.
+
+A replay of the loader's exact pattern in a bare container found it (4 cold shards, 5.2 GiB):
+
+| source of the H2D copy | CUDA context | throughput |
+|---|---|---|
+| file-backed mmap tensor (stock `safe_open().get_tensor()`) | no | disk-bound |
+| file-backed mmap tensor | **yes** | **0.09–0.12 GB/s (63 s)** |
+| same tensor `.clone()`d into anonymous memory first | yes | 2.1–2.3 GB/s cold, 8.5 GB/s warm |
+| `.pin_memory()` first | yes | same as clone |
+
+Tensors that are already contiguous after the TP narrow (row splits, whole tensors) were being copied
+straight from the mapping; column splits got a `.contiguous()` (a CPU copy) first and were fine. The
+per-rank mix of the two decides how much each rank pays — hence the asymmetry. MiaAI's PR #230 stages
+tensors off the mmap only on 64 KiB-page kernels ("cuMemcpyHtoDAsync wedges"); on the 4 KiB DGX OS
+kernel it does not wedge, it crawls, and the fix is worth just as much.
+
+`overlay/loadclone/weight_utils.py` = the image's file + two blocks: `param.clone()` in
+`safetensors_weights_iterator` (`GLM53_LOAD_CLONE`, default 1) and a prefetcher that keeps *n* shards
+ahead of the consumer in the page cache on *n* threads (`GLM53_LOAD_PREFETCH`, default 6). Bytes are
+identical by construction; only the copy path changes.
+
+| loader | head | worker |
+|---|---:|---:|
+| stock nightly | 274 s | 101 s |
+| clone | 104 s | 104 s |
+| clone + prefetch 3 | 73 s | 72 s |
+| **clone + prefetch 6 (default)** | **50 s** | **52 s** |
+| clone + prefetch 10 | 48 s | 51 s |
+| NVMe `read_ahead_kb` 128 → 2048 | no effect | no effect |
+
+Full boot (container start → `/health` + warmup): 8 min 30 → 4 min 30–5 min 30. Post-boot decode on the
+official protocol 87.1 / 43.6 / 54.7 tok/s (structured / prose / code-fr), within boot-to-boot variance
+of the reference 90.9 / 41.4 / 53.8; thinking-off and tool-calling unchanged.
 
 ## Prefix caching on this hybrid (2026-09-06/07)
 
