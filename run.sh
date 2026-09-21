@@ -148,7 +148,7 @@ fi
 # Measured "Loading weights took" (169 GiB, head/worker): stock 274/101 s -> clone 104/104 -> prefetch 3: 73/72
 # -> prefetch 6: 50/52 (10: 48/51 = plateau). NVMe read_ahead_kb had no effect. LOAD_CLONE=0 = stock iterator.
 if [ "${LOAD_CLONE:-1}" = 1 ]; then
-  EXTRA_MOUNTS+=(-v "$HERE/overlay/loadclone/weight_utils.py:$V/model_executor/model_loader/weight_utils.py:ro"
+  EXTRA_MOUNTS+=(-v "$HERE/overlay/loadclone/weight_utils.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/model_loader/weight_utils.py:ro"
                  -e GLM53_LOAD_CLONE=1 -e GLM53_LOAD_PREFETCH="${LOAD_PREFETCH:-6}")
 fi
 # NEVER add --language-model-only: it switches to Glm5NextForCausalLM and the module prefixes
