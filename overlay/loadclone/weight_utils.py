@@ -856,6 +856,25 @@ def _glm53_read_whole_file(path: str) -> None:
         logger.warning_once("[glm53-loadclone] prefetch failed on %s: %s", path, exc)
 
 
+def _glm53_load_evict() -> bool:
+    """[2026-09-25] Drop each consumed shard from the page cache (and all of them at the end). Hypothesis: on GB10 (unified
+    memory) the page cache left by the prefetcher (~6 shards ahead) is counted by vLLM as "non-torch" memory, shrinking the
+    KV pool (2.12 -> 1.82 M tokens since the fast loader). Measured: does NOT recover the pool (cause still open); harmless,
+    kept on. GLM53_LOAD_EVICT=0 = previous behaviour."""
+    return os.environ.get("GLM53_LOAD_EVICT", "1") != "0"
+
+
+def _glm53_evict(path: str) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
 class _Glm53Prefetcher:
     """Keeps `depth` shards ahead of the consumer in flight on a small thread pool."""
 
@@ -878,7 +897,7 @@ class _Glm53Prefetcher:
             fut.result()  # file idx is fully in cache before we map it
 
     def close(self) -> None:
-        self._pool.shutdown(wait=False, cancel_futures=True)
+        self._pool.shutdown(wait=_glm53_load_evict(), cancel_futures=True)
 
 
 def safetensors_weights_iterator(
@@ -1031,9 +1050,23 @@ def safetensors_weights_iterator(
                     if _glm53_load_clone():
                         param = param.clone()
                     yield name, param
+            if _glm53_load_clone() and _glm53_load_evict():
+                _glm53_evict(st_file)  # consumed and unmapped: its pages are no longer needed
 
     if _glm53_prefetcher is not None:
         _glm53_prefetcher.close()
+    if _glm53_load_clone() and _glm53_load_evict() and safetensors_load_strategy not in ("eager", "torchao"):
+        for _p in sorted_files:  # shards read ahead but not yet evicted (early stop)
+            _glm53_evict(_p)
+    if _glm53_load_clone() and os.environ.get("GLM53_LOAD_TRIM", "1") != "0":
+        # [2026-09-25] Freed CPU clones stay in the glibc heap (3.3 GiB [heap] RSS per rank after boot); on GB10 resident host
+        # memory is taken from available GPU memory -> counted "non-torch" by vLLM, smaller KV pool. (Did not recover it either.)
+        try:
+            import ctypes, gc
+            gc.collect()
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except Exception as exc:  # jamais bloquant
+            logger.warning_once("[glm53-loadclone] malloc_trim failed: %s", exc)
 
 def multi_thread_safetensors_weights_iterator(
     hf_weights_files: list[str],

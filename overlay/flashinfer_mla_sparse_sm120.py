@@ -214,7 +214,8 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if isinstance(q, tuple):
             q = torch.cat(q, dim=-1)
-        if self.rope_pad:
+        if self.rope_pad and q.shape[-1] < self.kv_lora_rank + self.kernel_qk_rope_head_dim:
+            # [2026-09-25] MLA_BMM may hand over q already padded (B, N, 512 + 64): do not pad again
             q = torch.nn.functional.pad(q, (0, self.rope_pad))
 
         num_actual_toks = q.shape[0]

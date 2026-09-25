@@ -1,10 +1,11 @@
 # GLM-5.3-Flash (EXL3) on stock upstream vLLM — 2× DGX Spark, SM121, CUDA graphs on
 
-**TL;DR (2026-09-18)** — GLM-5.3-Flash runs on the *official* `vllm/vllm-openai:nightly` image on two
-DGX Sparks (GB10, sm_121) at **91 tok/s structured / 40 prose / 53 code-fr / 60 code-en, cold prefill
-1 472 / 1 556 / 1 564 tok/s at 8K / 32K / 100K, 2.14 M tokens of KV pool at 1M context**, with CUDA graphs,
-DFlash2 speculative decoding and MiaAI's E3 / cooperative-MoE / thin-decode kernels. Everything is a **Python
-overlay** (small patch scripts) plus one extension build — **no vLLM C++ is rebuilt**.
+**TL;DR (2026-09-25)** — GLM-5.3-Flash runs on the *official* `vllm/vllm-openai:nightly` image on two
+DGX Sparks (GB10, sm_121) at **91 tok/s structured / ~40 prose / 53.5 code-fr / 60 code-en, cold prefill
+1 498 / 1 578 / 1 582 tok/s at 8K / 32K / 100K, 1.8 M tokens of KV pool at 1M context** (2.14 M with the slow
+loader), with CUDA graphs, DFlash2 speculative decoding and MiaAI's E3 / cooperative-MoE / thin-decode kernels.
+Everything is a **Python overlay** (small patch scripts) plus one extension build — **no vLLM C++ is rebuilt**.
+Latest changes: [2026-09-22 → 09-25](#2026-09-22--09-25-agent-latency-the-wi-fi-bug-and-what-we-did-not-adopt).
 
 ### Head-to-head with the MiaAI Lab kit (the reference fork stack for this hardware)
 
@@ -208,6 +209,49 @@ gives the same decode as the cooperative MoE (89.9 vs 90.9 structured), and with
 two are one gain, not two. The full comparison against their kit (measured on this hardware and as published) is in
 [`results/2026-09-18/comparison-vs-miaai-kit.md`](results/2026-09-18/comparison-vs-miaai-kit.md).
 
+## 2026-09-22 → 09-25: agent latency, the Wi-Fi bug, and what we did not adopt
+
+Four days aimed at the regime this stack actually serves (2-3 coding agents, ~117K of context, clients at
+**T=1.0 / top_p 0.95** by default) rather than the T=0 short-prompt benches used so far.
+
+**Adopted**
+
+| change | knob (default) | measured |
+|---|---|---|
+| **Control plane pinned to the fabric.** Without `VLLM_HOST_IP`, vLLM binds the ZMQ queues EngineCore ↔ remote worker (one `SchedulerOutput` per step) on the default-route IP — **Wi-Fi** on our nodes. At c3-c4 the worker received steps late and rank 0 sat in the all-reduce. | `FABRIC_HOST_IP=1` (`WORKER_IP` or the IPv4 of `NCCL_IF`) | c4: p99 inter-chunk 526-576 → **192-195 ms**, pauses > 250 ms 84-132 → **0**, run 68 → 60-65 s; c1 unchanged |
+| **Probabilistic DFlash2 drafts** + standard rejection sampling (canonical speculative sampling: lossless, identical at T=0) | `DRAFT_SAMPLE=probabilistic` (on in `supervise.sh`) | at T=1, 12 reps, 2 boots: **6/6 cells win**, tokens/step +3 to +19 %, tok/s +2 to +14 % (agent edit +14 %) |
+| **`SWA_TAIL`**: the drafter's sliding-window KV group (block 1152) could only match whole blocks, so every agent turn re-prefilled up to 4 608 tokens even though MLA and KDA stop at the prompt end. Partial-block caching + fine lookup for that group. | `SWA_TAIL=1` (on in `supervise.sh`) | multi-turn agent at 68K, turns 2-4: TTFT **3.1-3.3 → 0.9 s**; acceptance 0.576 vs 0.517 cold, logprob unchanged, code_eval 8/8 |
+| **`MLA_BMM`**: MLA's absorbed `W_UK_T`/`W_UV` bmm in Triton (cuBLAS on sm121 falls back to an sm80 wmma kernel, ~20 TFLOPS) + q written already padded to 576 (no cat, no pad) | `MLA_BMM=1` | prefill **+2.1-2.4 %** (1 498 / 1 578 / 1 582), bit-identical to cuBLAS, KL under the noise floor |
+| **E3 prefill cap**: thin/fat split at 16 rows for prefill only (decode keeps 64) | `PREFILL_ROWS=16` | expert layer −15 % (microbench), served prefill +0-2 % |
+
+**Measured and not adopted (kept opt-in, so others don't have to redo it)**
+
+- `FLASHKDA=1` — KDA prefill on the FlashKDA CUDA kernel already shipped in the image: prefill **+6-8 %**,
+  HumanEval A/B −0.5 pt (CI95 [−1.5; +0.3], noise), but the KL panel lands above the same-boot noise floor
+  (top-1 91.9 % vs 93.75 %) and the KV pool shrinks ~7 %. Not worth it for us.
+- `NGRAM=1` — hybrid DFlash2 + n-gram prompt-lookup draft on GPU, lossless. Offline simulation on real agent
+  sessions promised +9-15 %; **neutral in serving**: DFlash2 already copies from context.
+- `THIN_OVERLAP=1` — E3 thin kernel on a side stream next to the grouped path: neutral (−0.5 %).
+- `MAMBA_FREE=1` — port of MiaAI's superseded-KDA-state fix. Tested on the real vLLM block manager: our
+  geometry (chunks aligned to 4 608) does not leak on stock; kept as a safety net.
+- Adaptive-k driven by concurrency (`GLM53_ADAPTIVE_K_CONC=model`) and by per-position acceptance
+  (`GLM53_ADAPTIVE_K_EST=pos`): both neutral. The "bimodal c6 prose" that motivated them was run-to-run noise
+  (fixed k=2 gives 65 / 77 / 78 on three runs).
+- `--long-prefill-token-threshold 3584`: −20 % p99 freeze for the running stream but +15-18 % intruder TTFT and
+  −26 % aggregate at c4×12K. MiaAI's "fair v5" mixed-prefill scheduler: their gain is against their `skip`
+  default; stock vLLM already mixes prefill into decode here.
+- E3 prefill kernel: ncu + variant builds put the ceiling at ~+5 % (tensor pipe 64 %, register-bound occupancy;
+  every structural variant lost). Chantier closed.
+
+**Quality check** (2026-09-22): HumanEval 164 + 8 French tasks, 5 samples at T=0.7 (860 requests per side),
+this stack (dense layers + lm_head + draft in EXL3) **97.0 %** vs MiaAI's kit with BF16 dense layers **96.3 %**,
+CI95 of the difference [−0.5; +1.7]: no detectable degradation from quantizing the dense layers.
+
+**Profile of a production decode step** (T=1, one request): 77 ms = experts 36 ms (47 %, at the DRAM roofline)
++ dense EXL3 20 ms (~60-65 % of peak) + small BF16 GEMMs ~7 + NCCL 5 + copies 4 + mHC 2 + KDA 2 + MLA 1-2;
+nearly the same at 104K of context. Known open issue: the fast loader (`LOAD_CLONE=1`) costs ~0.3 M tokens of
+KV pool (~8 GiB of "non-torch" memory); page-cache eviction and `malloc_trim` do not recover it.
+
 ## Adaptive-k (opt-in since 2026-09-12, default-on in `supervise.sh`)
 
 DFlash2 drafts 8 tokens (1 anchor + k=7) regardless of how well the draft is accepted. On prose the
@@ -296,7 +340,9 @@ incoai/GLM-5.3-Flash-DFlash2 (BF16, works as-is) or an EXL3 quant of it (faster;
 redistributed, CC BY-NC-ND). Knobs: `SPEC=none` (no draft), `MAX_LEN`, `GMU`, `K`,
 `ADAPTIVE_K=1` (adaptive verification length; on by default under `supervise.sh`),
 `EXTRA_ALIAS=<name>` (extra served-model alias), `EXL3_FAT_KERNEL=0` (legacy MoE tier), `FUSED_MERGE=0` /
-`DENSE_NOCAT=0` (2026-09-18 prefill fixes off), `MOE_FAST=1` (MiaAI thin-decode kernels, opt-in).
+`DENSE_NOCAT=0` (2026-09-18 prefill fixes off), `MOE_FAST=1` (MiaAI thin-decode kernels, opt-in),
+`DRAFT_SAMPLE=probabilistic` / `SWA_TAIL=1` (on under `supervise.sh`), `MLA_BMM=0`, `PREFILL_ROWS=`,
+`FABRIC_HOST_IP=0` / `WORKER_IP=<ip>`, opt-ins `FLASHKDA=1`, `NGRAM=1`, `THIN_OVERLAP=1`, `MAMBA_FREE=1`.
 
 Never pass `--language-model-only`: it selects `Glm5NextForCausalLM`, whose module prefixes
 (`model.layers.*`) no longer match the pack's `language_model.model.layers.*` keys.
@@ -309,6 +355,13 @@ overlay/                the plugin, the SM120 backend, the patch scripts (docstr
 overlay/apc/            prefix-cache fixes (scheduler chunk alignment, coordinator SWA veto)
 overlay/adaptive_k/     opt-in adaptive verification length (scheduler + cudagraph overlays, generator, test)
 overlay/rightsize/      sparse-indexer workspace right-sizing (nightly anchor)
+overlay/loadclone/      fast weight loading (clone before H2D + threaded shard prefetch)
+overlay/swa_tail/       prefix hits at the prompt end for the drafter's sliding-window group (generator, test)
+overlay/mamba_free/     opt-in port of MiaAI's superseded-KDA-state fix (generator, test on the real manager)
+overlay/mla_bmm/        Triton bmm for MLA W_UK_T/W_UV at prefill + pre-padded q (generator, test)
+overlay/flashkda/       opt-in FlashKDA prefill for GLM's KDA (generator)
+overlay/ngram_hybrid/   opt-in hybrid DFlash2 + n-gram draft (generator, interpreter test)
+overlay/thin_overlap/   opt-in E3 thin/grouped overlap patch
 overlay/e3/             MiaAI's E3 grouped fat-expert MoE (.cu/.cuh + their build script, unmodified, AGPL)
 exl3-fat-kernel/        E2 fat-expert GEMM (.cu/.cuh) + graft script (MiaAI Lab) + gemm2 / atomic scatter
                         + patch_exl3_decode_pipeline_ours.py (MiaAI's SM121 thin-decode kernels, ported to this fork tree)

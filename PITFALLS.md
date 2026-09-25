@@ -98,3 +98,14 @@ Things that cost us a boot (8–10 minutes each on this hardware), in the order 
 - **`$( [ -n "$V" ] && echo … )` inside a bash array kills a `set -e` script when `V` is empty** (the
   assignment takes the substitution's exit status). Write `[ -z "$V" ] || echo …`. Cost one silent
   non-boot: both containers absent, empty logs, supervisor polling `/health` until its timeout.
+- **Multi-node vLLM without `VLLM_HOST_IP` puts the control plane on the default route.** NCCL was on
+  RoCE, but the ZMQ queues between the EngineCore and the remote worker (one `SchedulerOutput` per
+  step) were bound on the node's default-route IP — Wi-Fi here (power save on, 140 ms spikes). Nothing
+  logs it; c1 looks fine. At c3-c4 rank 1 got each step late: ~0.5 s freezes every 2-3 s, 15-22 % of
+  decode time. Check with `ss -tnp` inside the container; `run.sh` now pins it to the fabric
+  (`FABRIC_HOST_IP=1`).
+- **Benchmarking at T=0 hides the regime clients use.** Most OpenAI clients send no temperature, so
+  the server's `generation_config` (T=1.0 / top_p 0.95) applies; acceptance at 128K drops from 3.79 to
+  2.68 tokens/step for agent/code. Greedy drafting is the wrong default there (see `DRAFT_SAMPLE`).
+- **Greedy output is not reproducible on this stack** (E3 atomicAdd scatter): never use two greedy
+  runs as an equality test; compare with the KL panel against a same-boot noise floor.

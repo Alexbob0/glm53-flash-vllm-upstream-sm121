@@ -10,7 +10,14 @@ from typing import Any
 
 
 class _Glm53AdaptiveK:  # [glm53-adaptive-k]
-    """CPU-only EMA policy for the verified draft prefix length."""
+    """CPU-only policy for the verified draft prefix length.
+
+    est=ema  (default, byte-identical to 12/09): EMA of the accepted count per request.
+    est=pos  (21/09): per-position conditional acceptance p_i (EMA, censoring-aware);
+             E[accepted | k] = sum_{j<k} prod_{i<=j} p_i drives the choice. Positions a
+             trimmed draft never shows are relaxed toward p_{i-1} (rate pos_beta) and the
+             batch is probed at full length every probe_every steps, so k can climb again
+             without the ema saturation hack (the source of the c6 prose bimodality)."""
 
     def __init__(self) -> None:
         mode = os.environ.get("GLM53_ADAPTIVE_K", "off").strip().lower()
@@ -22,13 +29,30 @@ class _Glm53AdaptiveK:  # [glm53-adaptive-k]
         self.k_set = sorted({int(x) for x in raw.split(",") if x.strip()})
         self.saturate = os.environ.get("GLM53_ADAPTIVE_K_SATURATE", "max").strip().lower()
         self.hist_every = int(os.environ.get("GLM53_ADAPTIVE_K_HIST", "200"))
-        self.state: dict[str, list[float]] = {}  # req_id -> [ema, observed_steps]
+        # [conc] "0" = today (target = ceil(estimate + margin), batch-size blind); "model" = pick
+        # the k in k_set maximizing sum_r (E_r(k) + 1) / bytes_per_step(conc, k) with the bandwidth
+        # model of MiaAI's bench_ceiling: non-expert bytes + layers x distinct experts x expert
+        # bytes, distinct = E(1 - (1 - topk/E)^rows), rows = conc x (k + 1). Same verifier, exact
+        # sampling: the choice of k is quality-neutral by construction.
+        # nonexpert_mib: 9216 = MiaAI BF16 denses. Our denses are EXL3 K6: the 21/09 fixed-k sweep
+        # (c6 structured k7/k4/k2 = 240/195/146 ms per step, c1 k7 = 78 ms) fits 18 ms + 1.04 ms per
+        # distinct expert, i.e. ~4600 MiB of non-expert traffic per step -> default 4600 here.
+        self.conc_mode = os.environ.get("GLM53_ADAPTIVE_K_CONC", "0").strip().lower()
+        self.cost = {"nonexpert_mib": 4600.0, "expert_mib": 6.2, "layers": 42.0, "experts": 288.0, "topk": 8.0}
+        # [pos] estimator knobs
+        self.est = os.environ.get("GLM53_ADAPTIVE_K_EST", "ema").strip().lower()
+        self.pos_alpha = float(os.environ.get("GLM53_ADAPTIVE_K_POS_ALPHA", "0.2"))
+        self.pos_beta = float(os.environ.get("GLM53_ADAPTIVE_K_POS_BETA", "0.02"))
+        self.pos_prior = float(os.environ.get("GLM53_ADAPTIVE_K_POS_PRIOR", "0.7"))
+        self.probe_every = int(os.environ.get("GLM53_ADAPTIVE_K_PROBE", "32"))
+        self.state: dict[str, list] = {}  # req_id -> [ema, observed_steps, p[], seen[]]
         self.hist: dict[int, int] = {}
         self.steps = 0
         self.k_max = max(self.k_set) if self.k_set else 0
-        # Runtime override (no reboot): JSON {"mode","alpha","margin","set","saturate","min_steps"}
-        # at GLM53_ADAPTIVE_K_FILE (default: the mounted vLLM cache dir). "set" is clamped to
-        # the boot-time set because graphs are captured for the boot-time lengths only.
+        # Runtime override (no reboot): JSON {"mode","alpha","margin","set","saturate","min_steps",
+        # "conc","cost","est","pos_alpha","pos_beta","pos_prior","probe"} at GLM53_ADAPTIVE_K_FILE
+        # (default: the mounted vLLM cache dir). "set" is clamped to the boot-time set because
+        # graphs are captured for the boot-time lengths only.
         self.boot_set = list(self.k_set)
         self.boot_enabled = self.enabled
         self.file = os.environ.get("GLM53_ADAPTIVE_K_FILE", "/root/.cache/vllm/glm53_adaptive_k.json")
@@ -37,7 +61,9 @@ class _Glm53AdaptiveK:  # [glm53-adaptive-k]
         if self.enabled:
             print(
                 f"[glm53-adaptive-k] enabled set={self.k_set} alpha={self.alpha} "
-                f"margin={self.margin} min_steps={self.min_steps} saturate={self.saturate}",
+                f"margin={self.margin} min_steps={self.min_steps} saturate={self.saturate} "
+                f"conc={self.conc_mode} est={self.est} pos_alpha={self.pos_alpha} "
+                f"pos_beta={self.pos_beta} probe={self.probe_every}",
                 flush=True,
             )
 
@@ -63,6 +89,14 @@ class _Glm53AdaptiveK:  # [glm53-adaptive-k]
             self.margin = float(cfg.get("margin", self.margin))
             self.min_steps = int(cfg.get("min_steps", self.min_steps))
             self.saturate = str(cfg.get("saturate", self.saturate)).strip().lower()
+            self.conc_mode = str(cfg.get("conc", self.conc_mode)).strip().lower()
+            if isinstance(cfg.get("cost"), dict):
+                self.cost.update({str(a): float(b) for a, b in cfg["cost"].items()})
+            self.est = str(cfg.get("est", self.est)).strip().lower()
+            self.pos_alpha = float(cfg.get("pos_alpha", self.pos_alpha))
+            self.pos_beta = float(cfg.get("pos_beta", self.pos_beta))
+            self.pos_prior = float(cfg.get("pos_prior", self.pos_prior))
+            self.probe_every = int(cfg.get("probe", self.probe_every))
             if "set" in cfg:
                 want = {int(x) for x in (cfg["set"] if isinstance(cfg["set"], list) else str(cfg["set"]).split(","))}
                 self.k_set = sorted(want & set(self.boot_set)) or list(self.boot_set)
@@ -70,7 +104,9 @@ class _Glm53AdaptiveK:  # [glm53-adaptive-k]
             self.hist.clear()
             print(
                 f"[glm53-adaptive-k] reloaded {self.file}: enabled={self.enabled} set={self.k_set} "
-                f"alpha={self.alpha} margin={self.margin} min_steps={self.min_steps} saturate={self.saturate}",
+                f"alpha={self.alpha} margin={self.margin} min_steps={self.min_steps} saturate={self.saturate} "
+                f"conc={self.conc_mode} cost={self.cost} est={self.est} pos_alpha={self.pos_alpha} "
+                f"pos_beta={self.pos_beta} pos_prior={self.pos_prior} probe={self.probe_every}",
                 flush=True,
             )
         except Exception as exc:  # noqa: BLE001
@@ -85,12 +121,54 @@ class _Glm53AdaptiveK:  # [glm53-adaptive-k]
             obs = float(num_accepted)
         st = self.state.get(req_id)
         if st is None:
-            self.state[req_id] = [obs * self.alpha + float(self.k_max) * (1.0 - self.alpha), 1.0]
+            st = [obs * self.alpha + float(self.k_max) * (1.0 - self.alpha), 1.0,
+                  [self.pos_prior] * self.k_max, [0] * self.k_max]
+            self.state[req_id] = st
         else:
             st[0] = obs * self.alpha + st[0] * (1.0 - self.alpha)
             st[1] += 1.0
+        # [pos] prefix acceptance: positions < num_accepted accepted, position num_accepted
+        # rejected when the draft was longer, everything after is censored. A position the
+        # trimmed draft did not even show is relaxed toward its predecessor (monotone prior)
+        # so a request whose early positions improve gets its k back.
+        p, seen = st[2], st[3]
+        n_obs = min(num_accepted, self.k_max)
+        for i in range(n_obs):
+            seen[i] += 1
+            a = max(self.pos_alpha, 1.0 / seen[i])
+            p[i] += a * (1.0 - p[i])
+        if num_accepted < num_draft and num_accepted < self.k_max:
+            i = num_accepted
+            seen[i] += 1
+            a = max(self.pos_alpha, 1.0 / seen[i])
+            p[i] += a * (0.0 - p[i])
+        if self.pos_beta > 0.0:
+            for i in range(max(num_draft, 1), self.k_max):
+                if p[i] < p[i - 1]:
+                    p[i] += self.pos_beta * (p[i - 1] - p[i])
 
-    def choose(self, req_id: str, k: int, structured: bool):
+    @staticmethod
+    def expected(p, k: int) -> float:
+        """E[accepted draft tokens] for a draft of length k under per-position p."""
+        e, run = 0.0, 1.0
+        for i in range(min(k, len(p))):
+            run *= p[i]
+            e += run
+        return e
+
+    def _bytes(self, conc: int, v: int) -> float:
+        c = self.cost
+        rows = max(1, conc) * (v + 1)
+        distinct = c["experts"] * (1.0 - (1.0 - c["topk"] / c["experts"]) ** rows)
+        return c["nonexpert_mib"] + c["layers"] * c["expert_mib"] * distinct
+
+    def _gain(self, st, v: int) -> float:
+        """Expected tokens per step for one request at draft length v (+1 = bonus token)."""
+        if self.est == "pos":
+            return self.expected(st[2], v) + 1.0
+        return min(st[0], float(v)) + 1.0
+
+    def choose(self, req_id: str, k: int, structured: bool, conc: int = 1):
         """Draft length for one request, or None when it must stay at full length."""
         if not self.enabled or structured or k <= 0:
             return None
@@ -98,10 +176,53 @@ class _Glm53AdaptiveK:  # [glm53-adaptive-k]
         if st is None or st[1] < self.min_steps:
             return None
         import math
-        target = int(math.ceil(st[0] + self.margin))
+        if self.conc_mode == "model":
+            best, best_score = None, -1.0
+            for v in self.k_set:
+                if v > k:
+                    continue
+                score = self._gain(st, v) / self._bytes(conc, v)
+                if score > best_score:
+                    best, best_score = v, score
+            if best is None:
+                return None
+            return max(1, min(best, k))
+        est = self.expected(st[2], k) if self.est == "pos" else st[0]
+        target = int(math.ceil(est + self.margin))
         cands = [v for v in self.k_set if v <= min(target, k)]
         n = max(cands) if cands else min(self.k_set)
         return max(1, min(n, k))
+
+    def _decide(self, items, k: int) -> int:
+        """Uniform draft length for a decode batch. items: list of (req_id, structured).
+        Any structured-output or not-yet-observed request pins the batch at k."""
+        if self.probe_every > 0 and self.est == "pos" and self.steps % self.probe_every == 0:
+            return k  # [pos] full-length probe: refresh the censored positions
+        conc = len(items)
+        if self.est == "pos" and self.conc_mode == "model":
+            sts = []
+            for rid, s in items:
+                if s:
+                    return k
+                st = self.state.get(rid)
+                if st is None or st[1] < self.min_steps:
+                    return k
+                sts.append(st)
+            best, best_score = k, -1.0
+            for v in self.k_set:
+                if v > k:
+                    continue
+                score = sum(self._gain(st, v) for st in sts) / self._bytes(conc, v)
+                if score > best_score:
+                    best, best_score = v, score
+            return max(1, min(best, k))
+        ns = []
+        for rid, s in items:
+            n_i = self.choose(rid, k, s, conc)
+            if n_i is None:
+                return k
+            ns.append(n_i)
+        return min(ns) if ns else k
 
     def apply(self, reqs, live_ids) -> None:
         """reqs: list of (request, structured). Trims spec_token_ids to a uniform n.
@@ -113,14 +234,8 @@ class _Glm53AdaptiveK:  # [glm53-adaptive-k]
         if not self.enabled or not reqs:
             self.steps += 1
             return
-        ns = []
-        for r, s in reqs:
-            n_i = self.choose(r.request_id, len(r.spec_token_ids), s)
-            if n_i is None:
-                ns = None
-                break
-            ns.append(n_i)
-        n = max(len(r.spec_token_ids) for r, _ in reqs) if ns is None else min(ns)
+        k = max(len(r.spec_token_ids) for r, _ in reqs)
+        n = self._decide([(r.request_id, s) for r, s in reqs], k)
         for r, _ in reqs:
             if len(r.spec_token_ids) > n:
                 r.spec_token_ids = r.spec_token_ids[:n]
@@ -136,16 +251,9 @@ class _Glm53AdaptiveK:  # [glm53-adaptive-k]
         if not self.enabled or k <= 0:
             self.steps += 1
             return k
-        ns = []
-        for r in reqs:
-            if r is None or getattr(r, "is_prefill_chunk", False):
-                continue
-            n_i = self.choose(r.request_id, k, bool(getattr(r, "use_structured_output", False)))
-            if n_i is None:
-                ns = None
-                break
-            ns.append(n_i)
-        n = k if not ns else min(ns)
+        decode_reqs = [r for r in reqs if r is not None and not getattr(r, "is_prefill_chunk", False)]
+        items = [(r.request_id, bool(getattr(r, "use_structured_output", False))) for r in decode_reqs]
+        n = self._decide(items, k) if items else k
         self._count(n, live_ids)
         return n
 
@@ -156,6 +264,10 @@ class _Glm53AdaptiveK:  # [glm53-adaptive-k]
             total = sum(self.hist.values())
             parts = " ".join(f"{k}:{v}" for k, v in sorted(self.hist.items()))
             emas = " ".join(f"{rid[:8]}={st[0]:.2f}/{int(st[1])}" for rid, st in list(self.state.items())[:4])
+            if self.est == "pos":
+                emas += " | p " + " ".join(
+                    f"{rid[:8]}=[" + ",".join(f"{x:.2f}" for x in st[2]) + f"]E7={self.expected(st[2], self.k_max):.2f}"
+                    for rid, st in list(self.state.items())[:2])
             print(f"[glm53-adaptive-k] step {self.steps} chosen-length hist ({total}): {parts} | ema {emas}", flush=True)
             self.state = {rid: st for rid, st in self.state.items() if rid in live_ids}
 

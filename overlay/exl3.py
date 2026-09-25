@@ -176,6 +176,54 @@ def temp_rows_fused() -> int:
         return int(TEMP_ROWS_FUSED)
     return max(1, int(raw))
 
+def prefill_temp_rows() -> int | None:
+    """[22/09] EXL3_PREFILL_TEMP_ROWS=<n>: thin/fat cap used ONLY on prefill calls
+    (tokens > decode cap). Experts with count > n go to the E3 grouped kernels
+    instead of the fused thin kernel. Microbench 4608 tok, skew 1.0: cap 16 = 21.5 ms
+    vs cap 64 = 26.4 ms per layer (-19 %). Decode keeps EXL3_TEMP_ROWS_FUSED (>= 48
+    for graph-safe decode). Empty/absent = unchanged behaviour."""
+    raw = os.environ.get("EXL3_PREFILL_TEMP_ROWS", "").strip()
+    if not raw:
+        return None
+    return max(1, int(raw))
+
+
+_PREFILL_CAP_OFF_FILE = "/root/.cache/vllm/glm53_prefill_cap.off"
+_prefill_cap_state = {"calls": 0, "on": True}
+
+
+# [25/09] THIN_OVERLAP helpers
+_THIN_OVERLAP_ENV = os.environ.get("GLM53_THIN_OVERLAP", "1") == "1"
+_THIN_OVERLAP_OFF_FILE = "/root/.cache/vllm/glm53_thin_overlap.off"
+_thin_overlap_state = {"calls": 0, "on": _THIN_OVERLAP_ENV, "streams": {}, "logged": None}
+
+
+def _thin_overlap_stream(device: torch.device):
+    """Per-device side stream when the thin/grouped overlap is active, else None."""
+    st = _thin_overlap_state
+    if st["calls"] % 64 == 0:
+        st["on"] = _THIN_OVERLAP_ENV and not os.path.exists(_THIN_OVERLAP_OFF_FILE)
+    st["calls"] += 1
+    if st["logged"] != st["on"]:
+        st["logged"] = st["on"]
+        logger.info("[glm53-thin-overlap] %s", "ON" if st["on"] else "OFF")
+    if not st["on"] or torch.cuda.is_current_stream_capturing():
+        return None
+    s = st["streams"].get(device)
+    if s is None:
+        s = st["streams"][device] = torch.cuda.Stream(device=device)
+    return s
+
+
+def _prefill_cap_enabled() -> bool:
+    """Hot kill switch for the prefill cap (same-boot A/B): touch the .off file (re-read every 64 calls)."""
+    st = _prefill_cap_state
+    if st["calls"] % 64 == 0:
+        st["on"] = not os.path.exists(_PREFILL_CAP_OFF_FILE)
+    st["calls"] += 1
+    return st["on"]
+
+
 def sorted_fat_fallback_enabled() -> bool:
     """Use the existing expert-sorted buffers for oversized prefill experts."""
     return os.environ.get("EXL3_FAT_SORTED", "0") != "0"
@@ -1363,6 +1411,21 @@ def exl3_moe_fast_requested() -> bool:
     return raw == "1"
 
 
+def _fused_temps_cached(device, hidden: int, intermediate: int, concurrency: int, rows: int):
+    key = (str(device), hidden, intermediate, concurrency, rows)
+    temps = _FUSED_TEMP_CACHE.get(key)
+    if temps is None:
+        temps = (
+            torch.empty((concurrency, rows, hidden), dtype=torch.float16, device=device),
+            torch.empty((concurrency, rows, hidden), dtype=torch.float16, device=device),
+            torch.empty((concurrency, rows, intermediate), dtype=torch.float16, device=device),
+            torch.empty((concurrency, rows, intermediate), dtype=torch.float16, device=device),
+        )
+        _FUSED_TEMP_CACHE[key] = temps
+        _EXL3_FAT_DIAG["fused_temps_allocs"] += 1
+    return temps
+
+
 def build_exl3_fused_state(layer: torch.nn.Module, inners: list[dict[str, Any]]) -> None:
     """Pointer tables + fused temps, once after load. No per-token alloc."""
     import exllamav3_ext
@@ -1415,17 +1478,13 @@ def build_exl3_fused_state(layer: torch.nn.Module, inners: list[dict[str, Any]])
     if concurrency < 1:
         concurrency = 1
     rows = temp_rows_fused()
-    key = (str(device), hidden, intermediate, concurrency, rows)
-    temps = _FUSED_TEMP_CACHE.get(key)
-    if temps is None:
-        temps = (
-            torch.empty((concurrency, rows, hidden), dtype=torch.float16, device=device),
-            torch.empty((concurrency, rows, hidden), dtype=torch.float16, device=device),
-            torch.empty((concurrency, rows, intermediate), dtype=torch.float16, device=device),
-            torch.empty((concurrency, rows, intermediate), dtype=torch.float16, device=device),
-        )
-        _FUSED_TEMP_CACHE[key] = temps
-        _EXL3_FAT_DIAG["fused_temps_allocs"] += 1
+    temps = _fused_temps_cached(device, hidden, intermediate, concurrency, rows)
+    # [22/09] Optional smaller temps for prefill-only thin/fat cap (EXL3_PREFILL_TEMP_ROWS).
+    rows_p = prefill_temp_rows()
+    if rows_p is not None and rows_p < rows:
+        layer._exl3_prefill_temps = _fused_temps_cached(device, hidden, intermediate, concurrency, rows_p)
+    else:
+        layer._exl3_prefill_temps = None
     # Layers share one cache entry, so assign (never accumulate) the bytes.
     _EXL3_FAT_DIAG["fused_temps_bytes"] = sum(
         t.numel() * t.element_size() for t in temps
@@ -1613,13 +1672,34 @@ def apply_exl3_fused_moe(
         # E3: thin experts in the fused kernel (it skips count > cap), every
         # fat expert in three grouped launches driven by device-side tables.
         # No host sync, so this branch is CUDA-graph capturable.
-        _exl3_moe_launch(
-            fn, xh, out, expert_count, token_sorted, weight_sorted,
-            temps, ptrs, k, limit, n_active_host,
-        )
-        apply_exl3_grouped_fat(
-            xh, out, counts, token_sorted, weight_sorted, layer, cap, limit
-        )
+        # [22/09] Prefill-only cap: smaller temps -> the fused kernel skips more
+        # experts, which the grouped kernels then take (EXL3_PREFILL_TEMP_ROWS).
+        temps_p = getattr(layer, "_exl3_prefill_temps", None)
+        cap_p = cap
+        if temps_p is not None and _prefill_cap_enabled():
+            temps, cap_p = temps_p, int(temps_p[0].shape[1])
+            _EXL3_FAT_DIAG["prefill_cap_calls"] = _EXL3_FAT_DIAG.get("prefill_cap_calls", 0) + 1
+        side = _thin_overlap_stream(xh.device)  # [25/09] THIN_OVERLAP
+        if side is not None:
+            main = torch.cuda.current_stream(xh.device)
+            side.wait_stream(main)
+            with torch.cuda.stream(side):
+                _exl3_moe_launch(
+                    fn, xh, out, expert_count, token_sorted, weight_sorted,
+                    temps, ptrs, k, limit, n_active_host,
+                )
+            apply_exl3_grouped_fat(
+                xh, out, counts, token_sorted, weight_sorted, layer, cap_p, limit
+            )
+            main.wait_stream(side)
+        else:
+            _exl3_moe_launch(
+                fn, xh, out, expert_count, token_sorted, weight_sorted,
+                temps, ptrs, k, limit, n_active_host,
+            )
+            apply_exl3_grouped_fat(
+                xh, out, counts, token_sorted, weight_sorted, layer, cap_p, limit
+            )
         _record_exl3_fat_tier(layer, "grouped", "grouped_ok")
         if fat_expert_log_enabled():
             record_exl3_fat_expert_stats(counts)

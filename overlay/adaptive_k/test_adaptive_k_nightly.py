@@ -244,6 +244,81 @@ def policy_tests(helper_src: str) -> None:
         for r_count in range(1, 7):
             assert r_count * (n + 1) in EXPECTED_SIZES, (n, r_count)
 
+    # ---------------- est=pos (21/09): per-position estimator ----------------
+    # prose-like: 1 accepted of 7 -> p0 -> 1, p1 -> 0, E(7) ~ 1 -> target ceil(1+1)=2 -> k=2
+    p = make({"GLM53_ADAPTIVE_K": "ema", "GLM53_ADAPTIVE_K_EST": "pos", "GLM53_ADAPTIVE_K_HIST": "0",
+              "GLM53_ADAPTIVE_K_PROBE": "0"})
+    assert p.est == "pos"
+    a, b, s = _SReq("a"), _SReq("b"), _SReq("s", structured=True)
+    live = {"a": a, "b": b, "s": s}
+    for i in range(1, 12):
+        p.observe("a", 7, 1)
+        got = p.choose("a", 7, False)
+        assert (got is None) == (i < 4), (i, got)
+    st = p.state["a"]
+    assert st[2][0] > 0.95 and st[2][1] < 0.05, st[2]
+    assert abs(p.expected(st[2], 7) - st[2][0] * (1 + st[2][1])) < 1e-9
+    assert p.batch_k(7, [a], live) == 2
+    assert p.batch_k(7, [a, s], live) == 7, "structured pins full length"
+    # censored positions never shown at k=2 relax toward p1 -> once p0,p1 are ~1 the
+    # estimate climbs and k comes back to 7 without any saturation hack
+    for _ in range(400):
+        p.observe("a", 2, 2)
+    st = p.state["a"]
+    assert min(st[2]) > 0.9, st[2]
+    assert p.batch_k(7, [a], live) == 7, (p.expected(st[2], 7), st[2])
+    # ... and drops again when the tail is rejected at full length
+    for _ in range(12):
+        p.observe("a", 7, 1)
+    assert p.batch_k(7, [a], live) == 2
+    # relaxation is one-way (toward a higher predecessor only): a bad shown position stays bad
+    p.observe("a", 7, 3)  # p3 rejected
+    p3 = p.state["a"][2][3]
+    p.observe("a", 2, 2)  # position 3 not shown: may only rise toward p2
+    assert p.state["a"][2][3] >= p3
+
+    # probe: every probe_every batch steps the batch is pinned at full length
+    p = make({"GLM53_ADAPTIVE_K": "ema", "GLM53_ADAPTIVE_K_EST": "pos", "GLM53_ADAPTIVE_K_HIST": "0",
+              "GLM53_ADAPTIVE_K_PROBE": "8"})
+    for _ in range(10):
+        p.observe("a", 7, 1)
+    ks = [p.batch_k(7, [a], live) for _ in range(16)]
+    assert ks.count(7) == 2 and ks.count(2) == 14, ks
+
+    # conc=model + pos: joint batch choice maximizing sum_r (E_r + 1) / bytes(conc, k).
+    # A structured-like request alone -> 7; a prose-like alone -> 2; together the sum decides
+    # and the answer is a single k for the batch (not the per-request minimum).
+    p = make({"GLM53_ADAPTIVE_K": "ema", "GLM53_ADAPTIVE_K_EST": "pos", "GLM53_ADAPTIVE_K_CONC": "model",
+              "GLM53_ADAPTIVE_K_HIST": "0", "GLM53_ADAPTIVE_K_PROBE": "0"})
+    for _ in range(20):
+        p.observe("a", 7, 1)
+        p.observe("b", 7, 7)
+    assert p.batch_k(7, [b], live) == 7
+    assert p.batch_k(7, [a], live) == 2
+    sts = [p.state["a"], p.state["b"]]
+    want = max(p.k_set, key=lambda v: sum(p._gain(st, v) for st in sts) / p._bytes(2, v))
+    assert p.batch_k(7, [a, b], live) == want, (want, p.batch_k(7, [a, b], live))
+    assert p.batch_k(7, [a, b, s], live) == 7
+    assert p.batch_k(7, [a, _SReq("new")], live) == 7, "unobserved pins"
+    # bytes model: monotone in k and in conc
+    assert p._bytes(1, 2) < p._bytes(1, 4) < p._bytes(1, 7) < p._bytes(6, 7)
+    # est=ema is byte-identical in behaviour: same decisions as before with the same inputs
+    p = make({"GLM53_ADAPTIVE_K": "ema", "GLM53_ADAPTIVE_K_HIST": "0"})
+    for _ in range(15):
+        p.observe("a", 7, 1)
+    assert p.batch_k(7, [a], live) == 2 and p.est == "ema" and p.probe_every == 32
+    ks = [p.batch_k(7, [a], live) for _ in range(64)]
+    assert set(ks) == {2}, "probe must not fire in ema mode"
+
+    # runtime override can switch the estimator hot
+    with tempfile.TemporaryDirectory() as td:
+        f = Path(td) / "ak.json"
+        p = make({"GLM53_ADAPTIVE_K": "ema", "GLM53_ADAPTIVE_K_HIST": "0", "GLM53_ADAPTIVE_K_FILE": str(f)})
+        f.write_text(json.dumps({"mode": "ema", "est": "pos", "probe": 0, "pos_beta": 0.05, "cost": {"nonexpert_mib": 5000}}))
+        p.steps = 0
+        p._reload()
+        assert p.est == "pos" and p.probe_every == 0 and p.pos_beta == 0.05 and p.cost["nonexpert_mib"] == 5000.0
+
     # batch minimum across two requests (sync/apply path)
     p = make({"GLM53_ADAPTIVE_K": "ema", "GLM53_ADAPTIVE_K_HIST": "0"})
     a2, b2 = _Req("a"), _Req("b")
