@@ -1,35 +1,68 @@
 # GLM-5.3-Flash (EXL3) on stock upstream vLLM — 2× DGX Spark, SM121, CUDA graphs on
 
 **TL;DR (2026-09-25)** — GLM-5.3-Flash runs on the *official* `vllm/vllm-openai:nightly` image on two
-DGX Sparks (GB10, sm_121) at **91 tok/s structured / ~40 prose / 53.5 code-fr / 60 code-en, cold prefill
-1 498 / 1 578 / 1 582 tok/s at 8K / 32K / 100K, 1.8 M tokens of KV pool at 1M context** (2.14 M with the slow
-loader), with CUDA graphs, DFlash2 speculative decoding and MiaAI's E3 / cooperative-MoE / thin-decode kernels.
-Everything is a **Python overlay** (small patch scripts) plus one extension build — **no vLLM C++ is rebuilt**.
-Latest changes: [2026-09-22 → 09-25](#2026-09-22--09-25-agent-latency-the-wi-fi-bug-and-what-we-did-not-adopt).
+DGX Sparks (GB10, sm_121) with CUDA graphs, DFlash2 speculative decoding and MiaAI's E3 / cooperative-MoE /
+thin-decode kernels. Everything is a **Python overlay** (small patch scripts) plus one extension build —
+**no vLLM C++ is rebuilt**. Latest changes: [2026-09-22 → 09-25](#2026-09-22--09-25-agent-latency-the-wi-fi-bug-and-what-we-did-not-adopt).
 
-### Head-to-head with the MiaAI Lab kit (the reference fork stack for this hardware)
+### Current numbers (2026-09-25 morning, production config, one boot)
 
-| | **this repo** (2026-09-18) | MiaAI kit, best config, **same machines, same bench** (2026-09-12, `9348755`) | MiaAI kit `ca85576`, *as published* (2026-09-17/18) |
-|---|---:|---:|---:|
-| decode, structured (count 1-200) | **91.1** tok/s | 73.5 | 77.3 (coop) · 78.4 (thin-fast) |
-| decode, prose (en, hash map) | **39.5** | 32.6 | 34.9 · 37.1 (sparkDash) |
-| decode, code (fr, BST) | **53.4** | 41.7 | — |
-| decode, code (en, BST) | **60.0** | 48.6 | 73.9 (“code-1”, other prompt/bench) |
-| decode, code @ 32K / 131K context | **47.4 / 47.9** | 35.9 / 31.5 (stock flags) | — |
-| cold prefill 8K / 32K / 100K | **1 472** / 1 556 / **1 564** | 1 441 / **1 605** / 1 434 | ~1 580–1 640 @ 8K/32K (repeated text) |
-| KV pool | **2 140 221 tok @ 1M** (2.14×) | 883 552 @ 850K (1.04×) | ~1.05 M @ 900K |
-| c4, repeated 12K prompts, aggregate (our bench) | **41.0** tok/s | 21.0 | — |
-| structured probe, 2 / 4 concurrent streams, aggregate (their protocol) | **126–132** / **193** tok/s | — | 124.5 / — (coop, ×2) |
-| code_eval 8 functions / tool calling | 8/8 · pass | 8/8 · pass | — |
-| teacher-forced KL vs kit stock (1 792 pos.) | top-1 91.0 %, median 0.0095 nats | — (floor between two of its own boots: 93.5 %, 0.0053) | — |
+| | tok/s |
+|---|---:|
+| decode, structured (count 1-200) | **91.0** |
+| decode, prose (en, hash map) | **40.8** |
+| decode, code (fr, BST) / code (en, BST) | **53.2** / **59.3** |
+| decode, code (sparkDash "clamp" prompt) | **83.7** |
+| cold prefill 8K / 32K / 100K | **1 498 / 1 578 / 1 582** |
+| multi-turn agent at 68K context, turns 2-4 (TTFT) | **0.88-0.95 s** |
+| KV pool at 1M context | 1.81 M tokens (1.81×) with the fast loader · 2.14 M with `LOAD_CLONE=0` |
+| boot (weights 48 s on the head rank) | ~4 min 30 |
+| quality | code_eval 8/8 · tool calling pass · HumanEval+fr 97.0 % (2026-09-22, below) |
 
-Decode is **+21–28 %** over the kit measured on the same machines and **+6–16 %** over its best published
-numbers; cold prefill is at parity (−3 % at 32K, +2 % at 8K, +9 % at 100K); the KV pool is 2.4×. At 2 concurrent structured
-streams the aggregates are close (126–132 vs their published 124.5): our concurrency scaling is weaker (×1.4 vs ×1.6 from c1 to c2). The KL cost of
-our dense-EXL3 pack against their BF16 dense layers is ~0.004 nats median, with identical code_eval and tool calling.
-Full tables, protocol and their published sources: [`results/2026-09-18/comparison-vs-miaai-kit.md`](results/2026-09-18/comparison-vs-miaai-kit.md).
+Protocol: `bench/bench_decode.py` (MiaAI's `bench_decode.py`: streaming, temp 0, thinking off, TTFT excluded, median of 3);
+cold prefill = prompt tokens / TTFT, best of 2 salted prompts after a discarded warm-up pass.
 
-**Where the difference comes from** (each item measured in isolation, see [RESULTS.md](RESULTS.md)):
+### Head-to-head with the MiaAI Lab kit, same machines, same evening (2026-09-24)
+
+Kit `0f49cfd` in its **maximum config** (image built from the repo, 850K, fair mixed-prefill, adaptive-k ema,
+`DENSE_FP8=dense,kda`, cooperative MoE geometry 1, `MOE_FAST`, `KDA_BF16_LARGE_M`, `DRAFT_KV_COMPACT`, spin-wait 16)
+against this repo, both measured with the same scripts on the same two Sparks. Decode = sparkDash, TTFT excluded,
+mean of 2 passes, per stream / aggregate.
+
+| | **this repo** | MiaAI kit `0f49cfd` |
+|---|---:|---:|
+| structured, 1 stream | **86.4** | 63.2 ¹ |
+| code, 1 stream | **81.4** | 33.6 ¹ |
+| prose, 1 stream | **40.4** | 30.0 |
+| structured, 2 streams (aggregate) | **118** | 71 |
+| code, 2 streams (aggregate) | 105 | 108 |
+| prose, 2 streams (aggregate) | **55** | 45 |
+| structured / code, 4 streams (aggregate) | 130 / 161 | 168 / 192 ² |
+| prose, 4 streams (aggregate) | **71** | 45 |
+| cold prefill 8K / 32K / 100K | 1 449 / 1 513 / **1 499** ³ | 1 479 / 1 510 / 1 298 |
+| multi-turn agent 23K, turns 2-4 (TTFT) | **0.6-0.7 s** ⁴ | 1.2-3.8 s |
+| multi-turn agent 68K, turns 2-4 (TTFT) | 0.88-0.95 s ⁴ | 0.8-1.0 s |
+| same prompt + 64 tokens (20K) | **0.67-0.86 s** ⁴ | 1.85 s |
+| KV pool | 1.81× @ 1M (2.14× slow loader) | 1.85× @ 850K |
+| quality (HumanEval 164 + 8 fr, 5 samples at T=0.7, 2026-09-22, kit stock BF16 dense) | 97.0 % | 96.3 % (CI95 of the diff [−0.5; +1.7]) |
+
+¹ The kit's single-stream numbers were very noisy that evening (structured 74 → 52 between the two passes); on the
+official protocol on 2026-09-12 it gave 73.5 structured / 32.6 prose / 41.7 code-fr.
+² sparkDash showed the kit ahead at 4 streams on structured and code. A dedicated 4-stream decomposition (accepted
+tokens per step and ms per iteration from `/metrics`, 400 tokens, T=0, same probe on both stacks) found **no gap**:
+structured 155-180 vs 143-188, code 62-74 vs 59-66, prose 58-62 vs 51-54 tok/s aggregate, 3.45-3.58 vs 3.37-3.53
+tokens/step. The sparkDash difference is run-to-run variance.
+³ Before `MLA_BMM`; this morning 1 498 / 1 578 / 1 582.
+⁴ With `SWA_TAIL` (adopted the same night, right after this head-to-head); before it our hits stopped at the last
+multiple of 4 608 (68K turns: 3.1-3.3 s).
+
+**Summary**: single-stream decode clearly ahead, parity at 4 streams, prose ahead at every concurrency, cold prefill
+at parity up to 32K and +15 % at 100K, multi-turn prefix hits now at or better than the kit, same quality.
+The older 2026-09-18 comparison (kit `ca85576`, published numbers, KL panel) stays in
+[`results/2026-09-18/comparison-vs-miaai-kit.md`](results/2026-09-18/comparison-vs-miaai-kit.md); this one is in
+[`results/2026-09-24/h2h-vs-miaai-kit.md`](results/2026-09-24/h2h-vs-miaai-kit.md).
+
+**Where the difference comes from** (vs the MiaAI kit; each item measured in isolation, see [RESULTS.md](RESULTS.md)):
 
 | Difference vs the MiaAI kit | Effect here |
 |---|---|
@@ -42,13 +75,17 @@ Full tables, protocol and their published sources: [`results/2026-09-18/comparis
 | **Fused Triton LSE merge** of our 2048+128 top-k split (their fork has a native 2176 kernel; ours had 8 % of the chunk in eager fp32) | cold prefill **+6–7 %** |
 | Pre-allocated output in the dense EXL3 forward (no `torch.cat`) | cold prefill +2 % |
 | Their SM121 thin-decode fast path, ported to the fork tree (`MOE_FAST=1`) | = the cooperative MoE gain, **not additive**; kept for +1–2 % prefill |
-| 1M context at GMU 0.87, `MAX_NUM_SEQS=6` (their defaults: 850K / 0.85 / 4) | 2.14× vs 1.04× KV headroom |
+| 1M context at GMU 0.87, `MAX_NUM_SEQS=6` (their defaults: 850K / 0.85 / 4) | 1M instead of 850K at similar headroom (their pool grew to 1.85× in `0f49cfd`) |
+| **Control plane pinned to the fabric** (`VLLM_HOST_IP`; stock vLLM binds EngineCore ↔ worker ZMQ on the default route = Wi-Fi here) | c4 p99 inter-chunk 526-576 → 192-195 ms, no more 0.3-0.7 s stalls |
+| **Probabilistic DFlash2 drafts** + standard rejection sampling (lossless) | +2 to +14 % tok/s at T=1 (the clients' default) |
+| **`SWA_TAIL`**: prefix hits down to the prompt end for the drafter's sliding-window group | multi-turn 68K TTFT 3.1 → 0.9 s |
+| **`MLA_BMM`**: MLA absorbed bmm in Triton (cuBLAS picks an sm80 wmma kernel on sm121) | cold prefill +2.1-2.4 % |
 
 Protocol: `bench/bench_decode.py` (MiaAI's `bench_decode.py`: streaming, temp 0, thinking off, TTFT excluded, median of 3);
 cold prefill = prompt tokens / TTFT, best of 2 salted prompts after a discarded warm-up pass; quality = 8 executable code
 functions, multi-turn tool calling, teacher-forced top-20 logprob panel read against a same-boot or inter-boot noise floor
 (greedy output is **not** reproducible run-to-run on this stack, see PITFALLS.md). Hardware: 2× ASUS Ascent GX10
-(GB10, 128 GB unified), ConnectX-7 RoCE, both rails.
+(GB10, 128 GB unified), ConnectX-7 RoCE, one rail (~109 Gb/s).
 
 ## Why this exists
 
